@@ -1,0 +1,1 @@
+write-host "hello from f2"

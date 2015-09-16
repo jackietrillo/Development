@@ -1,0 +1,1 @@
+ throw new-object System.ApplicationException "I am an exception";

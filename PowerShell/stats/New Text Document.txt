@@ -1,0 +1,9 @@
+ $searchstring = "font"
+    new-item D:\docs\development\powershell\searchresults.txt -type file -force
+    get-content D:\docs\development\powershell\allui.txt | foreach-object { 
+        if ([string]$_ -ne "")
+        {
+            $result = Select-string -path $_ $searchstring  
+            if ([string]$result -ne "") { add-content D:\docs\development\powershell\searchresults.txt $_ }                  
+        }
+    }

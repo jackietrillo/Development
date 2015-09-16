@@ -1,0 +1,14 @@
+$env:userprofile
+$env:PSModulePath
+
+get-module -listavailable
+
+put module in 
+D:\users\jtrillo\documents\windowspowershell\modules\moduleName\moduleName.ps1
+
+import-module -name modulename
+get-command -module modulename
+
+
+
+

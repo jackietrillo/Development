@@ -1,0 +1,3454 @@
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[lc_sp_User_AssignmentsDup_Del]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[lc_sp_User_AssignmentsDup_Del]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+CREATE PROCEDURE [dbo].[lc_sp_User_AssignmentsDup_Del]
+(
+	@inUserAssignmentID NUMERIC 
+) 
+AS
+/*****************************************************************************
+  SP Description: Delete dupliate data from User Assignments table
+
+  Revision History:
+  Revision		Date        Developer	- Change Description  
+  2014.22.1.0	08/21/2014	TY			- LEARN-10244 fix multiple submits in the user assignment table    
+******************************************************************************/
+
+SET NOCOUNT ON
+
+
+-- Check if registry is set to clean and if there are duplicates 
+IF EXISTS(SELECT 1 FROM System_Registry (NOLOCK)
+	WHERE Item_Category = 'Options' AND Item_Key = 'CleanUserAssignments' AND Item_Value = N'1')
+   AND 
+   EXISTS(SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID > 0
+		GROUP BY Assignment_ID, User_ID, LC_ID, Test_ID, Test_Instance_ID, Assignment_Type, [StatusID]
+		HAVING COUNT(1) > 1)	
+BEGIN 	
+	-- @inUserAssignmentID is in the min value of the ID, so delete the duplicate max value because we don't want to delete the existing variable
+	IF EXISTS(SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID > 0
+		GROUP BY Assignment_ID, User_ID, LC_ID, Test_ID, Test_Instance_ID, Assignment_Type, [StatusID]
+		HAVING COUNT(1) > 1 AND MIN(User_Assignment_ID) = @inUserAssignmentID)
+	BEGIN
+		DELETE FROM User_Assignments
+		WHERE User_Assignment_ID IN(
+			SELECT MAX(User_Assignment_ID) FROM User_Assignments(NOLOCK) 
+			WHERE Assignment_ID > 0
+			GROUP BY Assignment_ID, User_ID, LC_ID, Test_ID, Test_Instance_ID, Assignment_Type, [StatusID]
+			HAVING COUNT(1) > 1 
+		)
+	END
+	ELSE
+	BEGIN
+		DELETE FROM User_Assignments
+		WHERE User_Assignment_ID IN(
+			SELECT MIN(User_Assignment_ID) FROM User_Assignments(NOLOCK) 
+			WHERE Assignment_ID > 0
+			GROUP BY Assignment_ID, User_ID, LC_ID, Test_ID, Test_Instance_ID, Assignment_Type, [StatusID]
+			HAVING COUNT(1) > 1 
+		)
+	END
+END
+
+SET NOCOUNT OFF
+
+
+GO
+
+GRANT EXECUTE ON [dbo].[lc_sp_User_AssignmentsDup_Del] TO [WebApp] AS [dbo]
+GO
+
+
+IF  EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'[dbo].[lc_sp_User_Assignments_InsUpd]') AND OBJECTPROPERTY(id,N'IsProcedure') = 1)
+DROP PROCEDURE [dbo].[lc_sp_User_Assignments_InsUpd]
+GO
+
+/****** Object:  StoredProcedure [dbo].[lc_sp_User_Assignments_InsUpd]    Script Date: 06/17/2014 13:48:02 ******/
+SET ANSI_NULLS OFF
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[lc_sp_User_Assignments_InsUpd]    
+( @inUserAssignmentID NUMERIC = NULL    
+, @inAssignmentID NUMERIC = NULL    
+, @inUserID   NUMERIC = NULL    
+, @idDateVisible  DATETIME = NULL    
+, @idDueDate   DATETIME = NULL    
+, @inLCID  NUMERIC = NULL    
+, @ivStatus   VARCHAR(15) = 'new'    
+, @ibTimezone BIT = 0  
+, @inLastUserID NUMERIC = NULL  
+)    
+AS    
+/*****************************************************************************    
+  SP Description: Inserts or updates a record in the User_Assignments table    
+  --------------------------    
+  Revision History    
+  ---------------------------    
+  Revision		Date		Changed By - Change Description    
+  ====================================================    
+  10.0.0		12/13/2006	JJL - Initial Creation    
+  11.6.1		05/08/2008  JT - Added status flag to insert statement  
+  11.10.1		09/22/2008  JT - Fixed issue with returnID being null  
+  11.12.1		10/09/2008  JT - Completion Status Changes  
+  12.1.1		01/19/2009  JT - Added flag @ibTimezone  
+  12.1.2		01/29/2009	KGC - Added TOP 1 for subquery.  
+  12.2.1		02/06/2009  JT - Add LastUserID, LastUpdate to insert/update  
+  12.6.1		03/31/2009  JT - Set StatusID to NULL if Status is NULL
+  13.0.1		01/27/2010  HRB - Changes made to create new entries even if same 'Assignment_ID' and 'User_ID' occures for Advanced Performance Appraisal
+  2013.22.0.1	06/25/2013	MB - Added update TrainingOffering_User_Map.
+  2013.22.0.1	07/02/2013	MB - Added condition IF ISNULL(@ivStatus, '') = 'removed' then Inactivate user from TrainingOffering_User_Map.
+  2013.22.0.2	07/03/2013	ET - If a user is assigned to a TO assignment that has already completed the TO, the should get the Assignment completed.
+  2013.22.0.3	07/09/2013	ET - Modified to call lc_sp_TrainingOffering_HandleUserRemovedFromLinkedParent
+  2014.22.0.1	06/17/2014	TY - Add select condition to insert, prevent duplicate insert when mapped from lc_sp_SC_Users_LearningPlan_Map_InsUpd
+  2014.22.1.0	08/21/2014	TY - LEARN-10244 fix multiple duplicate submits in the user assignment table  
+******************************************************************************/    
+    
+SET NOCOUNT ON    
+
+DECLARE @isInsert TINYINT
+DECLARE @returnID NUMERIC    
+  
+--11.12.1  
+DECLARE @StatusID INT  
+SET @StatusID = CASE ISNULL(@ivStatus, '')   
+      WHEN 'new' THEN 1 -- Incomplete  
+      WHEN 'approved' THEN 0 -- Completed  
+      WHEN 'viewedtest' THEN 1 -- Incomplete  
+      WHEN 'gradedtest' THEN 0 -- Completed  
+      WHEN 'submitted' THEN 9 -- Submitted  
+      WHEN 'removed' THEN 5 -- Not Attempted      
+    ELSE NULL  
+    END   
+    
+IF ( @inUserAssignmentID IS NOT NULL )     
+BEGIN    
+	-- Update    
+	UPDATE User_Assignments SET    
+		Date_Assigned = CURRENT_TIMESTAMP,    
+		Date_Visible = ISNULL(@idDateVisible, Date_Visible),    
+		Due_Date = ISNULL(@idDueDate, Due_Date),    
+		LC_ID = ISNULL(@inLCID, LC_ID),    
+		Status = ISNULL(@ivStatus, Status),    
+		StatusID =  ISNULL(@StatusID, StatusID),
+		LastUserID = ISNULL(@inLastUserID, LastUserID),  
+		LastUpdate = GetDate()    
+	WHERE User_Assignment_ID = @inUserAssignmentID     
+    
+	IF @@ERROR <> 0    
+	BEGIN    
+		-- Error    
+		RAISERROR('-999 :: [SQL ERROR]',16,1)    
+		RETURN -999    
+	END    
+	ELSE    
+		SELECT @returnID = @inUserAssignmentID    
+END      
+--ELSE IF ( EXISTS (SELECT 1 FROM User_Assignments WHERE Assignment_ID = @inAssignmentID AND [User_ID]= @inUserID) )     ---   13.0.1
+ELSE IF (EXISTS (SELECT 1 FROM User_Assignments UATABLE INNER JOIN Assignments ATABLE ON UATABLE.Assignment_ID = ATABLE.Assignment_ID        ---   13.0.1
+                         WHERE UATABLE.Assignment_ID = @inAssignmentID AND UATABLE.User_ID = @inUserID AND ATABLE.Objective NOT LIKE '%!PA:%'))
+BEGIN    
+	-- Update    
+	UPDATE User_Assignments SET    
+		Date_Assigned = CURRENT_TIMESTAMP,    
+		Date_Visible = ISNULL(@idDateVisible, Date_Visible),    
+		Due_Date = ISNULL(@idDueDate, Due_Date),    
+		LC_ID = ISNULL(@inLCID, LC_ID),    
+		Status = ISNULL(@ivStatus, Status),  
+		StatusID = ISNULL(@StatusID, StatusID),
+		LastUserID = ISNULL(@inLastUserID, LastUserID),  
+		LastUpdate = GetDate()    
+	WHERE Assignment_ID = @inAssignmentID     
+		AND [User_ID] = @inUserID    
+    
+	IF @@ERROR <> 0    
+	BEGIN    
+		-- Error    
+		RAISERROR('-999 :: [SQL ERROR]',16,1)    
+		RETURN -999    
+	END  
+	ELSE  -- 12.1.2  
+		SELECT @returnID = (SELECT TOP 1 User_Assignment_ID   
+		FROM User_Assignments   
+		WHERE Assignment_ID = @inAssignmentID 
+			AND [User_ID] = @inUserID  
+		ORDER BY User_Assignment_ID  DESC)  -- 11.10.1    
+END  
+ELSE    
+BEGIN    
+	IF NOT EXISTS(SELECT 1 FROM User_Assignments WHERE Assignment_ID = @inAssignmentID AND [User_ID] = @inUserID
+		AND LC_ID = @inLCID AND [Status] = @ivStatus AND StatusID = @StatusID)
+	BEGIN
+		-- Insert    
+		INSERT INTO dbo.User_Assignments(Assignment_ID, [User_ID], Date_Assigned, Date_Visible, Due_Date, LC_ID, Status, StatusID, LastUserID)    
+		SELECT @inAssignmentID, @inUserID, CURRENT_TIMESTAMP, @idDateVisible, @idDueDate, @inLCID, @ivStatus, @StatusID, @inLastUserID
+		  WHERE NOT EXISTS (SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @inAssignmentID AND User_ID = @inUserID AND LC_ID = @inLCID
+		   AND [Status] = @ivStatus AND StatusID = @StatusID)
+	  
+		SET @returnID = SCOPE_IDENTITY() 
+		SET @isInsert = 1
+	END  
+  
+	--12.1.1  
+	IF (@ibTimezone = 1)  
+	BEGIN  
+		EXEC lc_sp_Time_Zones_InsUpd 47  
+		, @returnID -- ItemType  
+		, 'Eastern Standard Time'  
+		, 1  -- Participates in DST  
+		, 300 -- UTC Offset  
+		, 60 -- DST Offset  
+		,'(GMT-05:00) Eastern Time (US & Canada)'  
+		, 0  
+		, 3 --DSTStartMonth   
+		, 0 -- DSTStartDay   
+		, 2 -- DSTStartDayInterval  
+		, 11 -- DSTEndMonth  
+		, 0 -- DSTEndDay   
+		, 1 -- DSTEndDayInterval  
+		, '2:00'  
+		, '2:00'  
+	END  
+  
+	IF @@ERROR <> 0    
+	BEGIN    
+		-- Error    
+		RAISERROR('-999 :: [SQL ERROR]',16,1)    
+		RETURN -999    
+	END  
+	ELSE    
+		SELECT @returnID  
+END    
+    
+DECLARE @TrainingOfferingID INT
+SET @TrainingOfferingID = (SELECT A.ItemIdAsInt FROM Assignments A WITH (NOLOCK) WHERE A.Assignment_ID = COALESCE(@inUserAssignmentID,@inAssignmentID) AND A.ItemTypeID = 71)
+
+IF @TrainingOfferingID IS NOT NULL
+BEGIN
+	IF ISNULL(@ivStatus, '') = 'removed'
+	BEGIN
+		IF EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM with (nolock) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @inUserID AND TOUM.StatusFlag = 1 AND TOUM.CompletionStatusID <> 0)
+		BEGIN
+			DECLARE @LastUpdateUserIDForExecution numeric
+			SET @LastUpdateUserIDForExecution = COALESCE(@inLastUserID, 1000)
+			EXEC lc_sp_TrainingOffering_HandleUserRemovedFromLinkedParent @TrainingOfferingID, @inUserID, @LastUpdateUserIDForExecution
+		END
+	END
+	ELSE
+	BEGIN
+		IF NOT EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @inUserID AND TOUM.StatusFlag = 1)
+		BEGIN
+			IF EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @inUserID AND TOUM.StatusFlag = 0)
+			BEGIN
+				-- Reactivate
+				UPDATE TrainingOffering_User_Map SET
+					  StatusFlag = 1,
+					  AssignedDate = GETDATE(),
+					  LastUserID = @inLastUserID,
+					  LastUpdate = GETDATE()
+				WHERE TrainingOfferingID = @TrainingOfferingID 
+					  AND UserID = @inUserID
+			END
+			ELSE
+			BEGIN 
+				-- Insert         
+				INSERT INTO TrainingOffering_User_Map(TrainingOfferingID, UserID, StatusFlag, AssignedDate, CreateDate, CreateUserID)
+				VALUES(@TrainingOfferingID, @inUserID, 1, GETDATE(), GETDATE(), COALESCE(@inLastUserID,@inUserID))                      
+			END
+
+			EXEC lc_sp_TrainingOffering_CompletionStatus_Upd @TrainingOfferingID, @inUserID, 'TrainingOfferingUserAdded', NULL, NULL, @inLastUserID, 1, 0		
+		END
+		
+		-- And, maybe the user already completed the Training Offering or some such business. If so, fire off some logic to Central which will trigger automation to handle this Assignment
+		-- and complete it if necessary.
+		IF EXISTS 
+		(
+			SELECT 1
+			FROM TrainingOffering_User_Map
+			WHERE UserID = @inUserID
+			AND TrainingOfferingID = @TrainingOfferingID
+			AND StatusFlag = 1
+			AND CompletionStatusID = 0 -- completed
+		)
+		BEGIN
+			DECLARE @UserList varchar(max)
+			SET @UserList = CONVERT(varchar, @inUserID)
+			EXEC lc_sp_TrainingOffering_Process_Automation_Request @iiTrainingOfferingID = @TrainingOfferingID, @ivUserIDs = @UserList, @inLCID = @inLCID, @inLastUserID = @inLastUserID, @ivAction = 'TrainingOfferingCompletedUserAddedToAssignment'  
+		END
+	
+	END
+END
+
+-- if this is an insert check if there are dups
+IF ISNULL(@isInsert, 0) = 1 
+BEGIN 
+	EXEC [lc_sp_User_AssignmentsDup_Del] @inUserAssignmentID=@inAssignmentID
+END
+    
+SET NOCOUNT OFF    
+  
+SELECT @returnID AS User_Assignment_ID    
+    
+-- Return success 0    
+RETURN 0  
+  
+GO
+GRANT EXECUTE ON [dbo].[lc_sp_User_Assignments_InsUpd] TO [WebApp]
+GO
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[lc_sp_TrainingOffering_CompletionStatus_Upd]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[lc_sp_TrainingOffering_CompletionStatus_Upd]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+
+CREATE PROCEDURE [dbo].[lc_sp_TrainingOffering_CompletionStatus_Upd]	
+( @iuTrainingOfferingID INT = NULL
+, @inUserID NUMERIC = NULL
+, @ivAction VARCHAR(50) = '' -- 'TrainingOfferingItemAdded', 'TrainingOfferingItemRemoved'
+, @iiItemType INT = NULL
+, @ivItemID VARCHAR(36) = NULL 
+, @inLastUserID NUMERIC = NULL
+, @ibSendCompletionMsg INT = 1 -- this flag is OBSOLETE, don't use it
+, @iiDebug INT = 0
+)
+AS
+/*****************************************************************************
+  SP Description:	Updates the LP StatusID for users in and LP
+  Revision History:
+  Version	Date		Who		Change Description
+2013.12.0.1	03/08/2013	KGC		Initial Creation 
+2013.12.0.2	03/11/2013	KGC		Added Stated Date and other Completion Item fields
+2013.12.0.3 03/14/2013	TY		Shorten lc_sp_TrainingOffering_Send_Automation_Message action param, truncate by central
+2013.22.0.1 06/18/2013	JT		Changed lc_sp_TrainingOffering_Send_Automation_Message sp name for TO Phase II completion processing
+2013.22.0.2 06/26/2013	ET		Training Offering Phase II - Modify completion status update proc to insert user mapping records if needed.
+								This was necessary for completion credits to work and should be beneficial in the future.
+2013.22.0.3	07/10/2013	ET		Modified to consider a user's learn center membership before auto-mapping records as per the last
+								revision (2013.22.0.2)
+2013.22.0.4 07/25/2013	ET		While addressing a different issue, noticed that the handling for when an item is completed (such as a course)
+								was incorrect. It was reactivating inactive TrainingOffering_User_Map records if necessary.
+******************************************************************************/
+
+SET NOCOUNT ON
+
+DECLARE @TrainingOfferingInsertUpdate TABLE ( TrainingOfferingID int, UserID numeric, IsInsert bit )
+
+DECLARE @TrainingOfferingUsers TABLE(TrainingOfferingID INT, UserID NUMERIC, LCID NUMERIC, STATUSID INT, LPFlag BIT, CompletionCreditPossible BIT)
+
+DECLARE @TrainingOfferingReturnResults TABLE(UserID NUMERIC, TrainingOfferingID VARCHAR(36), TrainingOfferingStatus NVARCHAR(100), TrainingOfferingAssignedDate DATETIME, 
+		TrainingOfferingStartedDate DATETIME, TrainingOfferingCompletedDate DATETIME, 
+		MappedItemID VARCHAR(36), MappedItemType NVARCHAR(50), MappedItemTypeID INT, MappedItemStatus NVARCHAR(100),			
+		MappedItemAssignedDate DATETIME, MappedItemStartedDate DATETIME, MappedItemCompletedDate DATETIME, MappedItemDueDate DATETIME, MappedItemExpirationDate DATETIME,  
+		MappedItemEnrolledDate DATETIME, TrainingOfferingCompletedItemID VARCHAR(36), TrainingOfferingCompletedItemTypeIID INT, TrainingOfferingCompletedItemAttemptID INT)  
+
+		
+DECLARE @StatusID VARCHAR(10)
+SET @StatusID = NULL
+SET @StatusID  = CASE WHEN ISNULL(@ivAction, '') = 'TrainingOfferingItemAdded' THEN '0,8'
+					  WHEN ISNULL(@ivAction, '') = 'TrainingOfferingItemRemoved' THEN '1'					
+			     END 	
+
+IF  (@iiItemType IS NOT NULL AND @ivItemID IS NULL)
+BEGIN
+	RAISERROR( '102 :: [MISSING REQUIRED PARAMETER]', 16, 1 )
+	RETURN 102
+END	
+
+DECLARE @DebugMessage VARCHAR(350)
+DECLARE @DebugCompletionStatus VARCHAR(5)
+SET @DebugCompletionStatus = dbo.lc_fn_GetSystemRegistryValue('Debug', 'Training Offering Completion Status', '1')
+
+IF @iiItemType = 4 -- Course 
+BEGIN	
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_Course_Map TCM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TCM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TCM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TCM.CourseID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+		
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+	
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, STATUSID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.[UserID], TOUM.CompletionStatusID
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_Course_Map TOCM (NOLOCK) ON TOCM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOCM.CourseID) = @ivItemID AND TOCM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.[UserID]) AND TOUM.StatusFlag = 1
+END 
+ELSE
+IF @iiItemType = 7 -- Class 
+BEGIN		
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_Class_Map TCM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TCM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TCM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TCM.ClassID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+				
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+	
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.[UserID], TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK)
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_Class_Map TOCM (NOLOCK) ON TOCM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOCM.ClassID) = @ivItemID AND TOCM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.[UserID]) AND TOUM.StatusFlag = 1
+END 
+ELSE
+IF @iiItemType = 8 -- Enrollment
+BEGIN	
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_Enrollment_Map TEM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TEM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TEM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TEM.EnrollmentID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+		
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+		
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_Enrollment_Map TOEM (NOLOCK) ON TOEM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOEM.EnrollmentID) = @ivItemID AND TOEM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+	
+	-- ILT Events	
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)				
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ILTEvent_Map TOIM (NOLOCK) ON T.TrainingOfferingID = TOIM.TrainingOfferingID AND TOIM.StatusFlag = 1
+		INNER JOIN ILT_Track T1 ON T1.ILT_Event_ID = TOIM.ILTEventID  AND T1.Status = 1	
+		INNER JOIN ILT_Session S ON S.ILT_TrackID = T1.ILT_Track_ID  AND S.Status = 1			
+		INNER JOIN Enrollments EN ON EN.Event_Type = 5 AND CONVERT(VARCHAR(36), EN.Enrollment_ID) = @ivItemID AND EN.Event_ID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND EN.Active = 1					  
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+	
+	-- ILT Tracks
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)				
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ILTTrack_Map TOIM (NOLOCK) ON T.TrainingOfferingID = TOIM.TrainingOfferingID AND TOIM.StatusFlag = 1
+		INNER JOIN ILT_Session S (NOLOCK) ON S.ILT_TrackID = TOIM.ILTTrackID  AND S.Status = 1			
+		INNER JOIN Enrollments EN (NOLOCK) ON EN.Event_Type = 5 AND CONVERT(VARCHAR(36), EN.Enrollment_ID) = @ivItemID AND EN.Event_ID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND EN.Active = 1			  
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+	
+	-- ILT Sessions
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)				
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ILTSession_Map TOIM (NOLOCK) ON T.TrainingOfferingID = TOIM.TrainingOfferingID AND TOIM.StatusFlag = 1
+		INNER JOIN ILT_Session S (NOLOCK) ON S.ILT_Session_ID = TOIM.ILTSessionID  AND S.Status = 1
+		INNER JOIN Enrollments EN (NOLOCK) ON EN.Event_Type = 5 AND CONVERT(VARCHAR(36), EN.Enrollment_ID) = @ivItemID AND EN.Event_ID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND EN.Active = 1			  
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1							
+END 
+ELSE
+IF @iiItemType = 36 -- Instance
+BEGIN	
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_TestInstance_Map TEM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TEM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TEM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TEM.TestInstanceID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+		
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+		
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_TestInstance_Map LTIM (NOLOCK) ON LTIM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), LTIM.TestInstanceID) = @ivItemID AND LTIM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+END
+ELSE
+IF @iiItemType = 15 -- ILT Event
+BEGIN	
+	
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ILTEvent_Map TOIM (NOLOCK) ON TOIM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOIM.ILTEventID) = @ivItemID AND TOIM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+END
+ELSE
+IF @iiItemType = 14 -- ILT Track
+BEGIN	
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_ILTTrack_Map TEM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TEM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TEM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TEM.ILTTrackID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+		
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+			
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ILTTrack_Map TOIM (NOLOCK) ON TOIM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOIM.ILTTrackID) = @ivItemID AND TOIM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+END
+ELSE
+IF @iiItemType = 5 -- ILT Session
+BEGIN	
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_ILTSession_Map TEM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TEM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TEM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TEM.ILTSessionID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+				
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+		
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ILTSession_Map TOIM (NOLOCK) ON TOIM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOIM.ILTSessionID) = @ivItemID AND TOIM.StatusFlag = 1
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+END
+ELSE
+IF @iiItemType = 58 -- External Training
+BEGIN	
+	IF @inUserID IS NOT NULL 
+	BEGIN
+		-- Insert TO_User_Map record any missing records for this course
+		INSERT INTO @TrainingOfferingInsertUpdate
+		(
+			TrainingOfferingID, 
+			UserID,
+			IsInsert
+		)
+		SELECT
+			TRNO.TrainingOfferingID,
+			@inUserID,
+			CASE
+				WHEN TOUM.TrainingOfferingID IS NOT NULL THEN 0 -- an update
+				ELSE 1 -- no record there, even inactivated, so this is an insert
+			END AS IsInsert
+		FROM TrainingOffering TRNO (NOLOCK) 
+		INNER JOIN TrainingOffering_ExternalTraining_Map TEM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TEM.TrainingOfferingID
+		LEFT OUTER JOIN TrainingOffering_User_Map TOUM (NOLOCK) 
+		ON TRNO.TrainingOfferingID = TOUM.TrainingOfferingID
+		AND TOUM.UserID = @inUserID
+		WHERE TRNO.StatusFlag = 1
+		AND TEM.StatusFlag = 1
+		AND CONVERT(VARCHAR(36), TEM.ExternalTrainingID) = @ivItemID 
+		AND dbo.lc_fn_IsUserMemberOfLearnCenter(@inUserID, TRNO.LCID) = 1
+				
+		-- Do Updates
+		UPDATE TOUM
+		SET 
+			StatusFlag = 1,
+			AssignedDate =
+				CASE	
+					WHEN StatusFlag = 1 THEN COALESCE(AssignedDate, CURRENT_TIMESTAMP)
+					ELSE CURRENT_TIMESTAMP
+				END,
+			LastUserID = @inLastUserID,
+			LastUpdate = GETDATE()
+		FROM TrainingOffering_User_Map TOUM
+		INNER JOIN @TrainingOfferingInsertUpdate TOIU
+		ON TOUM.TrainingOfferingID = TOIU.TrainingOfferingID
+		AND TOUM.UserID = TOIU.UserID
+        WHERE TOIU.IsInsert = 0
+              
+        -- Do Inserts
+        INSERT TrainingOffering_User_Map ( TrainingOfferingID, UserID, StatusFlag, AssignedDate, CompletionStatusID, CreateDate, CreateUserID )
+        SELECT 
+			TrainingOfferingID,
+			UserID,
+			1,
+			CURRENT_TIMESTAMP,
+			1, -- incomplete
+			CURRENT_TIMESTAMP,
+			1000
+		FROM @TrainingOfferingInsertUpdate
+		WHERE IsInsert = 1
+	END
+		
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID AND T.StatusFlag = 1
+		INNER JOIN TrainingOffering_ExternalTraining_Map TOEM (NOLOCK) ON TOEM.TrainingOfferingID = T.TrainingOfferingID AND CONVERT(VARCHAR(36), TOEM.ExternalTrainingID) = @ivItemID AND TOEM.StatusFlag = 1
+	 WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID) AND TOUM.StatusFlag = 1
+END
+ELSE
+IF @iiItemType IS NULL 
+BEGIN		
+	INSERT INTO @TrainingOfferingUsers(TrainingOfferingID, LCID, UserID, StatusID)
+	SELECT TOUM.TrainingOfferingID, T.LCID, TOUM.UserID, TOUM.CompletionStatusID 
+	FROM TrainingOffering_User_Map TOUM (NOLOCK) 
+		INNER JOIN TrainingOffering T (NOLOCK) ON TOUM.TrainingOfferingID = T.TrainingOfferingID 
+	WHERE TOUM.UserID = ISNULL(@inUserID, TOUM.UserID)
+		AND TOUM.[TrainingOfferingID] = ISNULL(@iuTrainingOfferingID, T.TrainingOfferingID)
+		AND TOUM.StatusFlag = 1  
+		--	AND (@StatusID IS NULL OR CONVERT(VARCHAR(10),ISNULL(ULMP.StatusID, '5')) IN (@StatusID))					
+END
+
+IF @iiDebug = 1
+BEGIN
+	SELECT TrainingOfferingID, UserID, LCID FROM @TrainingOfferingUsers
+END 
+
+DECLARE @TrainingOfferingID INT
+DECLARE @LCID NUMERIC
+DECLARE @UserID NUMERIC
+DECLARE @PrevStatusID INT 
+DECLARE @UserIDs VARCHAR(MAX) 
+
+DECLARE @TrainingOfferingStartedDate DATETIME, @TrainingOfferingCompletedItemID VARCHAR(36), @TrainingOfferingCompletedItemTypeIID INT, @TrainingOfferingCompletedItemAttemptID INT
+		
+-- output parameters for recalculation
+DECLARE @oCompletionStatus VARCHAR(100)
+DECLARE @oCompleteDate DATETIME          
+DECLARE @oShow INT   
+
+DECLARE @CompletedUsers TABLE(TrainingOfferingID INT, UserList VARCHAR(MAX))
+
+DECLARE TrainingOfferingUsers CURSOR LOCAL FAST_FORWARD FOR 
+SELECT TrainingOfferingID, LCID, UserID, StatusID 
+FROM @TrainingOfferingUsers 
+ORDER BY TrainingOfferingID, UserID
+	
+OPEN TrainingOfferingUsers
+FETCH NEXT FROM TrainingOfferingUsers INTO @TrainingOfferingID, @LCID, @UserID, @PrevStatusID
+WHILE @@FETCH_STATUS = 0
+BEGIN			
+	-- Update the LPFlag
+	UPDATE @TrainingOfferingUsers SET 
+		LPFlag = 1 
+	WHERE TrainingOfferingID = @TrainingOfferingID 
+		AND UserID = @UserID
+
+	DELETE FROM @TrainingOfferingReturnResults
+	SET @TrainingOfferingStartedDate = NULL
+	SET @TrainingOfferingCompletedItemID = NULL
+	SET @TrainingOfferingCompletedItemTypeIID = NULL
+	SET @TrainingOfferingCompletedItemAttemptID = NULL
+	
+	INSERT INTO @TrainingOfferingReturnResults(UserID, TrainingOfferingID, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate, 
+		MappedItemID, MappedItemType, MappedItemTypeID, MappedItemStatus, MappedItemAssignedDate, MappedItemStartedDate, MappedItemCompletedDate, MappedItemDueDate, 
+		MappedItemExpirationDate, MappedItemEnrolledDate, TrainingOfferingCompletedItemID, TrainingOfferingCompletedItemTypeIID, TrainingOfferingCompletedItemAttemptID)
+	EXEC dbo.lc_sp_TrainingOffering_Items @TrainingOfferingID, @UserID, 0, 0, 'lc_sp_TrainingOffering_CompletionStatus_Upd', 1, 1, 1, @oCompletionStatus OUTPUT, @oCompleteDate OUTPUT, 0
+
+	SELECT TOP 1 @TrainingOfferingStartedDate = TrainingOfferingStartedDate, 
+		@TrainingOfferingCompletedItemID = TrainingOfferingCompletedItemID, 
+		@TrainingOfferingCompletedItemTypeIID = TrainingOfferingCompletedItemTypeIID, 
+		@TrainingOfferingCompletedItemAttemptID = TrainingOfferingCompletedItemAttemptID
+	FROM @TrainingOfferingReturnResults
+	ORDER BY 
+		ISNULL(MappedItemCompletedDate, '6/6/2079'),
+		TrainingOfferingCompletedItemID
+		
+	
+	UPDATE TrainingOffering_User_Map SET 
+		StartedDate = @TrainingOfferingStartedDate,
+		CompletedItemID = @TrainingOfferingCompletedItemID, 
+		CompletedItemTypeID = @TrainingOfferingCompletedItemTypeIID, 
+		CompletedItemAttemptID = @TrainingOfferingCompletedItemAttemptID,
+		CompletionStatusID = (SELECT CompletionStatusID FROM CompletionStatus WHERE [Description] = @oCompletionStatus),
+		CompletedDate = @oCompleteDate,
+		StatusIDLastUpdate = GETDATE(),
+		StatusIDLastUserID = ISNULL(@inLastUserID, @UserID)
+	WHERE TrainingOfferingID = @TrainingOfferingID
+		AND UserID = @UserID	
+		
+	IF @PrevStatusID = 1 AND @oCompletionStatus = 'Completed'
+	BEGIN			
+		IF NOT EXISTS (SELECT 1 FROM @CompletedUsers WHERE TrainingOfferingID = @TrainingOfferingID)
+		BEGIN
+			SET @UserIDs = NULL
+			INSERT INTO @CompletedUsers (TrainingOfferingID) SELECT @TrainingOfferingID 			
+		END 	
+			
+		SET @UserIDs = ISNULL(@UserIDs, '') + CONVERT(VARCHAR(100), @UserID) + ','		
+						
+		UPDATE @CompletedUsers 
+			SET UserList =  LEFT(@UserIDs, LEN(@UserIDs) - 1)
+		WHERE TrainingOfferingID = @TrainingOfferingID
+	END 
+	
+	IF @DebugCompletionStatus	= 1
+	BEGIN
+		SET @DebugMessage = 'Updated Completion Status: Previous StatusID = ' + CONVERT(VARCHAR(10), @PrevStatusID) + ' New StatusID '  + CONVERT(VARCHAR(10), @oCompletionStatus) + ' @iuTrainingOfferingID: ' + CONVERT(VARCHAR(36), ISNULL(@TrainingOfferingID, '00000000-0000-0000-0000-000000000000') ) + ' @inUserID: ' + CONVERT(VARCHAR(36),	ISNULL(@UserID, 0) ) + ' @iiItemType: ' + CONVERT(VARCHAR(36), ISNULL(@iiItemType, 0) ) + ' @ivItemID: ' + CONVERT(VARCHAR(36), ISNULL(@ivItemID, 0) ) 	
+		
+		EXEC InsertDebugEventStart 'lc_sp_SC_TrainingOffering_CompletionStatus_Upd', 'Learning Plan Completion Status Calculation Completed', @DebugMessage, NULL, NULL, 2, 0
+	END	
+
+	FETCH NEXT FROM TrainingOfferingUsers INTO @TrainingOfferingID, @LCID, @UserID, @PrevStatusID
+END
+CLOSE TrainingOfferingUsers
+DEALLOCATE TrainingOfferingUsers
+
+IF @iiDebug = 1
+BEGIN
+	SELECT TrainingOfferingID, UserList FROM @CompletedUsers	
+END 
+
+DECLARE @UserList VARCHAR(MAX)
+DECLARE CompletedUsers CURSOR LOCAL FAST_FORWARD FOR SELECT TrainingOfferingID, UserList FROM @CompletedUsers	
+OPEN CompletedUsers
+FETCH NEXT FROM CompletedUsers INTO @TrainingOfferingID, @UserList
+WHILE @@FETCH_STATUS = 0
+BEGIN					
+	EXEC lc_sp_TrainingOffering_Process_Automation_Request @iiTrainingOfferingID = @TrainingOfferingID, @ivUserIDs = @UserList, @inLCID = @LCID, @inLastUserID = @inLastUserID, @ivAction = 'TrainingOfferingCompleted', @ivWhenToSend='TOUserCompleted'			
+
+	IF @DebugCompletionStatus	= 1
+	BEGIN
+		SET @DebugMessage = 'Sending Completion Message: TrainingOfferingID: ' + CONVERT(VARCHAR(36), @TrainingOfferingID) + ' User List: ' +  ISNULL(@UserList, '')		
+		EXEC InsertDebugEventStart 'lc_sp_SC_TrainingOffering_CompletionStatus_Upd', 'Learning Plan Completion Status Calculation Completed', @DebugMessage, NULL, NULL, 2, 0
+	END	
+	
+	FETCH NEXT FROM CompletedUsers INTO @TrainingOfferingID, @UserList
+END
+CLOSE CompletedUsers
+DEALLOCATE CompletedUsers
+
+-- Trigger the recalculation for Learning Plans that are mapped to these training offerings
+DECLARE TrainingOfferingForLP CURSOR LOCAL FAST_FORWARD FOR 
+SELECT DISTINCT TrainingOfferingID, UserID
+FROM @TrainingOfferingUsers 
+WHERE LPFlag = 1
+	
+OPEN TrainingOfferingForLP
+FETCH NEXT FROM TrainingOfferingForLP INTO @TrainingOfferingID, @UserID
+WHILE @@FETCH_STATUS = 0
+BEGIN			
+	EXEC lc_sp_SC_LearningPlan_CompletionStatus_Upd	NULL, @UserID, 'LearningPlanItemCompleted', 71, @TrainingOfferingID, @inLastUserID, @ibSendCompletionMsg, @iiDebug
+
+	FETCH NEXT FROM TrainingOfferingForLP INTO @TrainingOfferingID, @UserID
+END
+CLOSE TrainingOfferingForLP
+DEALLOCATE TrainingOfferingForLP
+
+IF @@ERROR <> 0
+BEGIN
+-- Error
+	RAISERROR('-101 :: [SQL ERROR]',16,1)
+	RETURN -101
+END
+
+SET NOCOUNT OFF
+
+
+GO
+
+GRANT EXECUTE ON [dbo].[lc_sp_TrainingOffering_CompletionStatus_Upd] TO [WebApp] AS [dbo]
+GO
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[InsertUserAssignment]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[InsertUserAssignment]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+CREATE PROCEDURE [dbo].[InsertUserAssignment]
+(@assignmentid NUMERIC
+, @userid NUMERIC
+, @datevisible DATETIME
+, @duedate DATETIME
+, @lcid NUMERIC
+, @status VARCHAR(15)='new' 
+, @inLastUserID NUMERIC = NULL
+) 
+AS
+/*****************************************************************************
+  SP Description: Insert User Assignment
+
+  Revision History:
+  
+-- Added the IF Condition by Kushal -- 11/30/2005
+-- Mod if Condition - Kim Brown -- 1/9/2006
+-- @status was added - Kim Brown -- 1/9/2006
+-- @status was value is set to NULL by default - Kim Brown -- 3/14/2006
+
+-- If the assignment/user combination exists, we need to update it.
+
+  Revision History:
+  Revision		Date        Developer - Change Description  
+  11.10.1		08/20/2008  JT -  Changed to return userassignmentid
+  11.12.1		10/09/2008  JT -  Completion Status Changes
+  12.2.1		02/06/2009  JT - Add LastUserID, LastUpdate to insert/update
+  13.6.1		04/26/2010  KGC - Added return SELECT instead of just RETURN
+  14.7.1		08/06/2012  KGC - Replaced the INSERT statement to check for existing values while inserting (LEARN-4956)
+  2013.22.0.1	06/25/2013	MB - Added update TrainingOffering_User_Map.
+  2013.22.0.2	07/03/2013	ET - If a user is assigned to a TO assignment that has already completed the TO, the should get the Assignment completed.
+  2014.22.1.1	08/21/2014	TY - LEARN-10244 fix multiple submits in the user assignment table    
+******************************************************************************/
+
+SET NOCOUNT ON
+
+DECLARE @userassignmentid NUMERIC
+DECLARE @isInsert TINYINT
+
+--11.12.1
+DECLARE @StatusID INT
+SET @StatusID = CASE ISNULL(@status, '') 
+                               WHEN 'new' THEN 1 -- Incomplete
+                              WHEN 'approved' THEN 0 -- Completed
+                              WHEN 'viewedtest' THEN 1 -- Incomplete
+                              WHEN 'gradedtest' THEN 0 -- Completed
+                              WHEN 'submitted' THEN 9 -- Submitted
+                              WHEN 'removed' THEN 5 -- Not Attempted               
+                              WHEN '' THEN 1 -- Incomplete 
+                        ELSE 1 -- Incomplete
+                        END   
+
+IF EXISTS (SELECT 1 FROM User_Assignments WHERE Assignment_ID = @assignmentid AND [User_ID]= @userid)
+BEGIN
+      -- Update
+      UPDATE User_Assignments SET
+            Date_Assigned = CURRENT_TIMESTAMP,
+            Date_Visible = @datevisible,
+            Due_Date = @duedate,
+            LC_ID = @lcid,
+            Status = @status, 
+            StatusID = @StatusID, -- 11.12.1
+            LastUserID = ISNULL(@inLastUserID, LastUserID),
+            LastUpdate = GetDate()  
+      WHERE Assignment_ID = @assignmentid 
+            AND User_ID = @userid
+
+      SET @userassignmentid = (SELECT User_Assignment_ID FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND User_ID = @userid)
+END
+ELSE
+BEGIN
+      -- Insert
+      IF NOT EXISTS(SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND [User_ID] = @userid
+			AND LC_ID = @lcid AND StatusID = @StatusID)
+	  BEGIN
+		  INSERT INTO User_Assignments (Assignment_ID, User_ID, Date_Assigned, Date_Visible, Due_Date, LC_ID, StatusID, LastUserID)
+		  SELECT @assignmentid, @userid, CURRENT_TIMESTAMP, @datevisible, @duedate, @lcid, @StatusID, @inLastUserID
+		  WHERE NOT EXISTS (SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND User_ID = @userid
+			AND LC_ID = @lcid AND StatusID = @StatusID)
+
+		SET @userassignmentid = SCOPE_IDENTITY()
+	  
+		SET @isInsert = 1
+	  END
+END
+
+DECLARE @TrainingOfferingID INT
+SET @TrainingOfferingID = (SELECT A.ItemID FROM Assignments A WITH (NOLOCK) WHERE A.Assignment_ID = @assignmentid AND A.ItemTypeID = 71)
+
+IF @TrainingOfferingID IS NOT NULL 
+	AND NOT EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 1)
+BEGIN
+      IF EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 0)
+      BEGIN
+            -- Reactivate
+            UPDATE TrainingOffering_User_Map SET
+                  StatusFlag = 1,
+                  AssignedDate = GETDATE(),
+                  LastUserID = @inLastUserID,
+                  LastUpdate = GETDATE()
+            WHERE TrainingOfferingID = @TrainingOfferingID 
+                  AND UserID = @userid
+      END
+      ELSE
+      BEGIN 
+            -- Insert         
+            INSERT INTO TrainingOffering_User_Map(TrainingOfferingID, UserID, StatusFlag, AssignedDate, CreateDate, CreateUserID)
+            VALUES(@TrainingOfferingID, @userid, 1, GETDATE(), GETDATE(), COALESCE(@inLastUserID,@userid))                      
+      END
+      
+      EXEC lc_sp_TrainingOffering_CompletionStatus_Upd @TrainingOfferingID, @userid, 'TrainingOfferingUserAdded', NULL, NULL, @inLastUserID, 1, 0
+END 
+
+IF @TrainingOfferingID IS NOT NULL
+BEGIN
+	-- And, maybe the user already completed the Training Offering or some such business. If so, fire off some logic to Central which will trigger automation to handle this Assignment
+	-- and complete it if necessary.
+	IF EXISTS 
+	(
+		SELECT 1
+		FROM TrainingOffering_User_Map
+		WHERE UserID = @userid
+		AND TrainingOfferingID = @TrainingOfferingID
+		AND StatusFlag = 1
+		AND CompletionStatusID = 0 -- completed
+	)
+	BEGIN
+		DECLARE @UserList varchar(max)
+		SET @UserList = CONVERT(varchar, @userid)
+		EXEC lc_sp_TrainingOffering_Process_Automation_Request @iiTrainingOfferingID = @TrainingOfferingID, @ivUserIDs = @UserList, @inLCID = @lcid, @inLastUserID = @inLastUserID, @ivAction = 'TrainingOfferingCompletedUserAddedToAssignment'  
+	END
+END
+
+-- if this is an insert check if there are dups
+IF ISNULL(@isInsert, 0) = 1 
+BEGIN 
+	EXEC [lc_sp_User_AssignmentsDup_Del] @inUserAssignmentID=@userassignmentid
+END
+
+
+
+SELECT @userassignmentid
+
+RETURN @userassignmentid
+
+SET NOCOUNT OFF
+
+
+GO
+
+GRANT EXECUTE ON [dbo].[InsertUserAssignment] TO [WebApp] AS [dbo]
+GO
+
+
+IF  EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'[dbo].[InsertUpdateLCMemberData]') AND OBJECTPROPERTY(id,N'IsProcedure') = 1)
+DROP PROCEDURE [dbo].[InsertUpdateLCMemberData]
+GO
+
+/****** Object:  StoredProcedure [dbo].[InsertUpdateLCMemberData]    Script Date: 07/12/2012 14:14:33 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE PROCEDURE [dbo].[InsertUpdateLCMemberData](
+@lcid numeric
+, @memberid numeric
+, @fieldid numeric 
+, @data NVARCHAR(4000)
+, @ibSendGroupSync BIT = 1
+, @ibIndexSearchData BIT = 1
+) 
+AS
+/*****************************************************************************
+  SP Description:	Given the parameters above, this stored procedure inserts
+			the User data for a Custom User Field.
+			This SP is intended to be used with an Execute command
+			(Fire and forget)
+
+  Revision History:
+  Revision	Date		Changed By - Change Description
+			11/23/2005	PLK - Modified to check @data for Null values.  These are mainly
+						being introduced by Integrations and are responsible for an 
+						extreme reduction in efficiency.
+  10.11.1	11/14/2007	KGC - Changed the parameter @data from 250 to 4000
+  12.8.1    07/23/2009   JT - Changed parameter @data to NVARCHAR for unicode support
+  14.6.1	07/12/2012	MJR - Added support for dynamic group sync
+  14.6.2	07/26/2012	MJR - (LEARN-6420) Check for grouplist before sending message. Corrected code to lookup correct field id.
+  14.7.1	09/04/2012	MJR - Check if dynamic groups is enabled
+  13A.1		02/20/2013	CK	- Moved GroupCriteria automation messaging to it's own 
+						stored proc so that it could be called directly from within appcode.
+  13c.1.1	08/18/2013	MJR - Added parameter to control whether or not changes should be pushed to the search indexer.
+							- Added code to send generate search indexer task
+  13c.1.2	09/17/2013	MJR - (LEARN-10047) Added required parameter values for search indexing request
+  2013.32.0.1	10/29/2013	CK - (LEARN-10910) Modified to check new sys registry key before sending groupsync message  
+  2014.22.2.1	9/9/2014	MJR - (LEARN-15315) Added missing UPDATE statement to update dirty date for record
+******************************************************************************/
+
+DECLARE @oldValue nvarchar(4000)
+DECLARE @nId NUMERIC(18,0)
+DECLARE @SendSynchMessage varchar(50)
+
+SET @nId = NULL
+
+SELECT @nId = Unique_Data_ID 
+	, @oldValue = Data
+FROM LC_Member_Data (NOLOCK)
+WHERE Member_ID = @memberid 
+	AND Field_ID = @fieldid
+
+IF @nId IS NOT NULL
+BEGIN
+	IF @data Is Not Null
+	BEGIN
+		UPDATE LC_Member_Data 
+		SET Data = @data 
+		WHERE Unique_Data_ID = @nId
+	END
+	ELSE
+	BEGIN
+		DELETE From LC_Member_Data 
+		WHERE Unique_Data_ID = @nId
+			
+		SET @data = '__'	-- Set this so it will notice difference in data and queue the automation message if applicable
+	END
+END
+ELSE
+BEGIN
+	IF @data IS NOT NULL
+	BEGIN
+		INSERT INTO LC_Member_Data(LC_ID, Member_ID, Field_ID, Data) 
+		VALUES (@lcid, @memberid, @fieldid, @data)
+		
+		SET @nId = SCOPE_IDENTITY()
+	END
+	ELSE
+		SET @ibSendGroupSync = 0
+END
+
+-- get value for SendSynchMessageOnUserUpdate key in system registry
+-- if it doesn't exist lc_fn_GetSystemRegistryValue will return default value of '1'
+SET @SendSynchMessage=(SELECT [dbo].[lc_fn_GetSystemRegistryValue] ('Automation','SendSynchMessageOnUserUpdate','1') )
+				
+IF dbo.lc_fn_LC_Group_GetConfiguration() = '1' AND ISNULL(@ibSendGroupSync, 1) = 1 AND @SendSynchMessage = '1' AND ISNULL(@oldValue, '') <> ISNULL(@data, '') AND @fieldid IS NOT NULL AND @memberid IS NOT NULL
+BEGIN
+	EXEC [dbo].[lc_sp_LC_GroupCriteria_Build_Automation_Message]
+		@lcid, @memberid, @fieldid 
+END
+
+IF dbo.lc_fn_LC_Search_IndexingEnabled() = '1' AND ISNULL(@ibIndexSearchData, 1) = 1 AND ISNULL(@oldValue, '') <> ISNULL(@data, '') AND @fieldid IS NOT NULL AND @memberid IS NOT NULL
+BEGIN
+	-- Update the records as dirty so indexing will request document update
+	UPDATE Users
+	SET SearchIndexDirtyDate = GETDATE()
+	WHERE [User_ID] = @memberid
+
+	DECLARE @memberidString VARCHAR(15)
+	SET @memberidString = CONVERT(VARCHAR(15), @memberid)
+	EXEC [dbo].[lc_sp_LC_Search_IndexingAction_Request] '3', @memberidString, 0, @lcid, @memberid
+END
+GO
+
+GRANT EXECUTE ON [dbo].[InsertUpdateLCMemberData] TO [WebApp]
+GO
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[lc_sp_TrainingOffering_Items]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[lc_sp_TrainingOffering_Items]
+GO
+
+/****** Object:  StoredProcedure [dbo].[lc_sp_TrainingOffering_Items]    Script Date: 08/20/2014 15:41:20 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+CREATE PROCEDURE [dbo].[lc_sp_TrainingOffering_Items]
+( @iuTrainingOfferingID INT = NULL
+, @inUserID NUMERIC = NULL
+, @ibShowOnlyMappedUsers BIT = 0
+, @ibUseTempTable BIT = 0
+, @ivSource VARCHAR(50) = ''
+, @ibReturnMappedItems BIT = 1
+, @ibReturnCompletionStatus BIT = 1
+, @ibRecalculateFlag BIT = 0
+, @ovCompletionStatus VARCHAR(100) OUTPUT                 
+, @odCompletedDate DATETIME OUTPUT           
+, @ibDebugFlag BIT = 0
+)
+AS
+/*****************************************************************************
+  SP Description: This SP return training offering progress for user including all mapped items.
+		Parameters: 	
+				@iuTrainingOfferingID --> Training Offering ID
+				@inUserID --> User ID
+				@ibShowOnlyMappedUsers --> Flag to indicate whether or not to show only mapped users
+				@ibUseTempTable --> Flag to indicate whether or not to use temp tables or @iuTrainingOfferingID and @inUserID parameters
+				@ivSource --> Source from where this SP is being called from. This can be used to return different data or perform different actions based on source
+				@ibReturnData --> Flag to indicate whether or not to return the data.
+				@ibReturnCompletionStatus --> Flag to indicate whether or not to return completion status
+				@ovStatus --> Completion Status as Output
+				@odCompletedDate --> Completed Date as Output
+				@ibDebugFlag --> Flag to show Debug info or not.
+  Revision History:
+  Revision		Date		Changed By - Purpose
+  2013.12.0.1	03/05/2013	RM - Initial Creation
+  2013.12.0.2	03/22/2013	TY - Resolve null output variable @ovCompletionStatus J8681
+  2013.12.0.2	04/04/2013	KGC - Fixed the code to min date for course completion (LEARN-8847) and also added code to return data when called from lc_sp_SC_UserLearningPlanItems (LEARN-8853)
+  2013.12.0.3	04/08/2013	KGC - Fixed the code for External Training (LEARN-8893)
+  2013.21.0.1	05/07/2013	KGC - Added the code to populate #TrainingOfferingResults table when called from lc_sp_SC_UserLearningPlanItems (LEARN-8704) 
+  2013.22.0.1	07/10/2013	ET	- Additional potential calling proc and corrected the description in the comments above for 'SP Description'
+  2013.22.0.2	07/25/2013	ET	- For test instances, needs to use existing TOUM date if it is for the same test instance since it will dictate the 'overall' completed
+								  date for the user (LEARN-10030)
+******************************************************************************/
+BEGIN
+	SET NOCOUNT ON
+	SET ANSI_WARNINGS OFF
+	
+	DECLARE @MinMappedItemCompletedDate DATETIME, @MinMappedItemStartedDate DATETIME, @CompletionStatus VARCHAR(30)
+	DECLARE @TrainingOfferingID VARCHAR(36), @UserID NUMERIC
+	DECLARE @OneOrAll BIT, @MappedItemID VARCHAR(36)
+	DECLARE @TrainingOfferingMappings TABLE(TrainingOfferingID INT, TrainingOfferingName NVARCHAR(100), MappedItemID VARCHAR(36), MappedItemName NVARCHAR(510), MappedItemDescription NVARCHAR(4000), MappedItemType NVARCHAR(50), MappedItemTypeID INT, MappedItemDueDate DATETIME, MappedItemLastUpdate DATETIME, 
+		AssignmentPointValue NUMERIC, OneOrAll BIT, EnrollmentEventType INT, EnrollmentEventStartDate DATETIME, EnrollmentEventStopDate DATETIME)
+
+    DECLARE @UserAssignments TABLE(UserID NUMERIC, TestInstanceID NUMERIC, UserAssignmentID INT, DateSubmitted DATETIME, Grade DECIMAL(20, 3), PointValue DECIMAL(20, 3),Status VARCHAR(15))
+	DECLARE @EventTrackSessions TABLE(EventID INT, TrackID INT, SessionID INT, SessionStartDate DATETIME, SessionEndDate DATETIME, EnrollmentName NVARCHAR(255), 
+		EnrollmentOpenDate DATETIME, EnrollmentCloseDate DATETIME, UserID NUMERIC, PreStatus INT, PostStatus INT, SessionStatus NVARCHAR(50), TrackStatus NVARCHAR(50), EventStatus NVARCHAR(50), TrackCompletedDate DATETIME, EventCompletedDate DATETIME)
+	DECLARE @CourseStatus TABLE(CourseID NUMERIC, UserID NUMERIC, CourseStatusID INT, PercentComplete FLOAT, DateStarted DATETIME, DateCompleted DATETIME, MasteryScore FLOAT, ExpirationDate DATETIME, Status VARCHAR(15), StatusID INT)
+	DECLARE @ClassStatus TABLE(ClassID VARCHAR(36), UserID NUMERIC, ClassStatusID INT, PercentComplete FLOAT, DateStarted DATETIME, DateCompleted DATETIME, Score FLOAT, ExpirationDate DATETIME)
+
+	DECLARE @ReturnResults TABLE(UserID NUMERIC, TrainingOfferingID VARCHAR(36), TrainingOfferingName NVARCHAR(510), TrainingOfferingStatus NVARCHAR(100), TrainingOfferingAssignedDate DATETIME, 
+		TrainingOfferingStartedDate DATETIME, TrainingOfferingCompletedDate DATETIME, 
+		MappedItemID VARCHAR(36), MappedItemName NVARCHAR(510), MappedItemDescription NVARCHAR(4000),MappedItemType NVARCHAR(50), MappedItemTypeID INT, MappedItemStatus NVARCHAR(100),			
+		MappedItemAssignedDate DATETIME, MappedItemStartedDate DATETIME, MappedItemCompletedDate DATETIME, MappedItemDueDate DATETIME, MappedItemExpirationDate DATETIME,  
+		MappedItemLastUpdate DATETIME, MappedItemOneOrAll BIT, MappedItemScore NVARCHAR(50), MappedItemPercentComplete FLOAT, 
+		MappedItemRegistrationOpenDate DATETIME, MappedItemRegistrationCloseDate DATETIME, MappedItemEnrolledDate DATETIME, UserEnrollmentLastChangeDate DATETIME, 
+		MappedItemPreStatus NVARCHAR(50), MappedItemPostStatus NVARCHAR(50), ResultID INT IDENTITY, MappedItemAttemptID INT,
+		TrainingOfferingCompletedItemID VARCHAR(36), TrainingOfferingCompletedItemTypeIID INT, TrainingOfferingCompletedItemAttemptID INT)  
+	
+	DECLARE @TrainingOffering TABLE(TrainingOfferingID INT, TrainingOfferingName NVARCHAR(100))
+	DECLARE @User TABLE (UserID NUMERIC)
+	
+	IF @ibUseTempTable = 1
+	BEGIN
+		INSERT INTO @TrainingOffering
+		SELECT TrainingOfferingID, TrainingOfferingName FROM #TrainingOffering
+		
+		INSERT INTO @User
+		SELECT UserID FROM #User
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @TrainingOffering
+		SELECT T.TrainingOfferingID, T.TrainingOfferingName
+		FROM TrainingOffering T (NOLOCK)
+		WHERE T.TrainingOfferingID = @iuTrainingOfferingID
+		
+		INSERT INTO @User(UserID)
+		SELECT @inUserID
+	END
+	
+	IF @ibDebugFlag = 1
+	BEGIN
+		SELECT * FROM @TrainingOffering
+		SELECT * FROM @User
+	END
+
+	-- Learning Plans Mappings Data
+	-- -- Classes
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemLastUpdate)
+	SELECT T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), C.Class_ID), C.Title,  CONVERT(NVARCHAR(4000), C.[Description]), 'Class', 7, TCM.LastUpdate
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_Class_Map TCM (NOLOCK) ON T.TrainingOfferingID = TCM.TrainingOfferingID AND TCM.StatusFlag = 1
+		INNER JOIN Classes C (NOLOCK) ON TCM.ClassID = C.Class_ID		 
+
+	-- -- Courses
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemLastUpdate)
+	SELECT T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), C.Course_ID), C.Title, CONVERT(NVARCHAR(4000), C.[Description]), 'Course', 4, TCM.LastUpdate
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_Course_Map TCM (NOLOCK) ON T.TrainingOfferingID = TCM.TrainingOfferingID AND TCM.StatusFlag = 1
+		INNER JOIN Courses C (NOLOCK) ON TCM.CourseID = C.Course_ID		
+		
+	-- -- Enrollments
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemLastUpdate, EnrollmentEventStartDate, EnrollmentEventStopDate, EnrollmentEventType)
+	SELECT T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), E.Enrollment_ID), E.Name, CONVERT(NVARCHAR(4000), E.[Description]), 'Enrollment', 8, TEM.LastUpdate, E.Event_Start, E.Event_Stop, E.Event_Type
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_Enrollment_Map TEM (NOLOCK) ON T.TrainingOfferingID = TEM.TrainingOfferingID AND TEM.StatusFlag = 1
+		INNER JOIN Enrollments E (NOLOCK) ON TEM.EnrollmentID = E.Enrollment_ID AND E.Active = 1
+		
+	-- -- ILT Events
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, OneOrAll, MappedItemLastUpdate)
+	SELECT  T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), E.ILT_Event_ID), E.Name, CONVERT(NVARCHAR(4000), E.Description), 'ILT Event', 15, TIM.OneOrAll, ISNULL(TIM.LastUpdate, TIM.CreateDate)
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_ILTEvent_Map TIM (NOLOCK) ON T.TrainingOfferingID = TIM.TrainingOfferingID AND TIM.StatusFlag = 1
+		INNER JOIN ILT_Event E (NOLOCK) ON E.ILT_Event_ID = TIM.ILTEventID AND E.Status = 1
+
+	-- -- ILT Tracks
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, OneOrAll, MappedItemLastUpdate)
+	SELECT	T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), T1.ILT_Track_ID), T1.Name, CONVERT(NVARCHAR(4000), T1.Description), 'ILT Track', 14, TIM.OneOrAll, ISNULL(TIM.LastUpdate, TIM.CreateDate)
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_ILTTrack_Map TIM (NOLOCK) ON T.TrainingOfferingID = TIM.TrainingOfferingID AND TIM.StatusFlag = 1
+		INNER JOIN ILT_Track T1 ON T1.ILT_Track_ID = TIM.ILTTrackID AND T1.Status = 1
+
+	-- -- ILT Sessions
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemLastUpdate)
+	SELECT	T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), S.ILT_Session_ID), S.Name, CONVERT(NVARCHAR(4000), S.Description), 'ILT Session', 5, ISNULL(TIM.LastUpdate, TIM.CreateDate)
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_ILTSession_Map TIM (NOLOCK) ON T.TrainingOfferingID = TIM.TrainingOfferingID AND TIM.StatusFlag = 1
+		INNER JOIN ILT_Session S (NOLOCK) ON S.ILT_Session_ID = TIM.ILTSessionID AND S.Status = 1
+		INNER JOIN ILT_Track T1 ON T1.ILT_Track_ID = S.ILT_TrackID
+		INNER JOIN ILT_Event E (NOLOCK) ON E.ILT_Event_ID = T1.ILT_Event_ID
+		
+	-- -- Test Instances
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemLastUpdate)
+	SELECT	T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), TI.Test_Instance_ID), TI.Instance_Title, '', 'Test Instance', 36, ISNULL(TTM.LastUpdate, TTM.CreateDate)
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_TestInstance_Map TTM (NOLOCK) ON T.TrainingOfferingID = TTM.TrainingOfferingID AND TTM.StatusFlag = 1
+		INNER JOIN Test_Instances TI (NOLOCK) ON TI.Test_Instance_ID = TTM.TestInstanceID AND TI.StatusFlag = 1
+	
+	-- -- External Trainings
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName, MappedItemID, MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemLastUpdate)
+	SELECT	T.TrainingOfferingID, T.TrainingOfferingName, CONVERT(VARCHAR(36), ET.ExternalTrainingID), ET.Name, ET.Descrip, 'External Training', 58, ISNULL(TTM.LastUpdate, TTM.CreateDate)
+	FROM @TrainingOffering T
+		INNER JOIN TrainingOffering_ExternalTraining_Map TTM (NOLOCK) ON T.TrainingOfferingID = TTM.TrainingOfferingID AND TTM.StatusFlag = 1
+		INNER JOIN ET_ExternalTraining ET (NOLOCK) ON ET.ExternalTrainingID = TTM.ExternalTrainingID AND ET.StatusFlag = 1
+	
+	-- -- Insert Learning Plans that do not have any mappings.
+	INSERT INTO @TrainingOfferingMappings(TrainingOfferingID, TrainingOfferingName)
+	SELECT T.TrainingOfferingID, T.TrainingOfferingName
+	FROM @TrainingOffering T
+	WHERE NOT EXISTS (SELECT 1 FROM @TrainingOfferingMappings TM WHERE T.TrainingOfferingID = TM.TrainingOfferingID)
+
+	IF @ibDebugFlag = 1
+	BEGIN
+		SELECT * FROM @TrainingOfferingMappings
+	END
+	
+	IF EXISTS (SELECT 1 FROM @TrainingOfferingMappings WHERE MappedItemType IN ('ILT Event'))
+	BEGIN
+		-- Get the data for ILTs.
+		INSERT INTO @EventTrackSessions(EventID, TrackID, SessionID, SessionStartDate, SessionEndDate, EnrollmentName, EnrollmentOpenDate, EnrollmentCloseDate, UserID, PreStatus, PostStatus)
+		SELECT T.ILT_Event_ID, T.ILT_Track_ID, S.ILT_Session_ID, EN.Event_Start, EN.Event_Stop, EN.[Name], EN.Registration_Open, EN.Registration_Close, EU.[User_ID], EU.Status, (CASE WHEN EN.Event_Start <= CONVERT(SMALLDATETIME, GETDATE()) THEN EU.Post_Status ELSE NULL END)
+		FROM @TrainingOfferingMappings TM 
+			INNER JOIN ILT_Track T ON TM.MappedItemID = CONVERT(VARCHAR(36), T.ILT_Event_ID) AND T.Status = 1
+			INNER JOIN ILT_Session S ON S.ILT_TrackID = T.ILT_Track_ID AND S.Status = 1
+			INNER JOIN Enrollments EN ON EN.Event_Type = 5 AND EN.Event_ID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND EN.Active = 1
+			INNER JOIN Enrollment_Users EU ON EU.Enrollment_ID = EN.Enrollment_ID AND EU.Status IN (0, 2)
+			INNER JOIN @User U ON EU.User_ID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Event'
+	END
+
+	IF EXISTS (SELECT 1 FROM @TrainingOfferingMappings WHERE MappedItemType IN ('ILT Track'))
+	BEGIN
+		-- Get the data for ILTs.
+		INSERT INTO @EventTrackSessions(EventID, TrackID, SessionID, SessionStartDate, SessionEndDate, EnrollmentName, EnrollmentOpenDate, EnrollmentCloseDate, UserID, PreStatus, PostStatus)
+		SELECT NULL, S.ILT_TrackID, S.ILT_Session_ID, EN.Event_Start, EN.Event_Stop, EN.[Name], EN.Registration_Open, EN.Registration_Close, EU.[User_ID], EU.Status, (CASE WHEN EN.Event_Start <= CONVERT(SMALLDATETIME, GETDATE()) THEN EU.Post_Status ELSE NULL END)
+		FROM @TrainingOfferingMappings TM 
+			INNER JOIN ILT_Session S ON TM.MappedItemID = CONVERT(VARCHAR(36), S.ILT_TrackID) AND S.Status = 1
+			INNER JOIN Enrollments EN ON EN.Event_Type = 5 AND EN.Event_ID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND EN.Active = 1
+			INNER JOIN Enrollment_Users EU ON EU.Enrollment_ID = EN.Enrollment_ID AND EU.Status IN (0, 2)
+			INNER JOIN @User U ON EU.User_ID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Track'
+		AND S.ILT_Session_ID NOT IN (SELECT SessionID FROM @EventTrackSessions)
+	END
+
+	IF EXISTS (SELECT 1 FROM @TrainingOfferingMappings WHERE MappedItemType IN ('ILT Session'))
+	BEGIN
+		-- Get the data for ILTs.
+		INSERT INTO @EventTrackSessions(SessionID, SessionStartDate, SessionEndDate, EnrollmentName, EnrollmentOpenDate, EnrollmentCloseDate, UserID, PreStatus, PostStatus)
+		SELECT S.ILT_Session_ID, EN.Event_Start, EN.Event_Stop, EN.[Name], EN.Registration_Open, EN.Registration_Close, EU.[User_ID], EU.Status, (CASE WHEN EN.Event_Start <= CONVERT(SMALLDATETIME, GETDATE()) THEN EU.Post_Status ELSE NULL END)
+		FROM @TrainingOfferingMappings TM 
+			INNER JOIN ILT_Session S ON TM.MappedItemID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND S.Status = 1
+			INNER JOIN Enrollments EN ON EN.Event_Type = 5 AND EN.Event_ID = CONVERT(VARCHAR(36), S.ILT_Session_ID) AND EN.Active = 1
+			INNER JOIN Enrollment_Users EU ON EU.Enrollment_ID = EN.Enrollment_ID AND EU.Status IN (0, 2)
+			INNER JOIN @User U ON EU.User_ID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Session'
+			AND S.ILT_Session_ID NOT IN (SELECT SessionID FROM @EventTrackSessions)
+	END
+
+	IF EXISTS (SELECT 1 FROM @TrainingOfferingMappings WHERE MappedItemType IN ('ILT Event', 'ILT Session', 'ILT Track'))
+	BEGIN
+		-- Update the SessionStatus column for sessions.
+		UPDATE ETS SET 
+			SessionStatus = 'Completed'
+		FROM @EventTrackSessions ETS
+		WHERE EXISTS (SELECT 1 FROM @EventTrackSessions ETS1
+					WHERE ETS1.SessionID = ETS.SessionID		
+					AND ETS1.UserID = ETS.UserID
+					AND ETS1.PostStatus IN (0,2) AND ETS1.SessionEndDate < GETDATE())
+
+		UPDATE ETS SET 
+			SessionStatus = 'Exempt'
+		FROM @EventTrackSessions ETS
+		WHERE EXISTS (SELECT 1 FROM @EventTrackSessions ETS1
+					WHERE ETS1.SessionID = ETS.SessionID		
+					AND ETS1.UserID = ETS.UserID
+					AND ETS1.PostStatus IN (8) AND ETS1.SessionEndDate < GETDATE())
+
+		UPDATE ETS SET 
+			SessionStatus = 'Incomplete'
+		FROM @EventTrackSessions ETS
+		WHERE SessionStatus IS NULL
+
+		IF @ibDebugFlag = 1
+		BEGIN
+			SELECT * FROM @EventTrackSessions
+		END
+		
+		DECLARE C_EventTrackSessions CURSOR LOCAL FAST_FORWARD FOR
+		SELECT TM.MappedItemID, ETS.UserID, TM.OneOrAll
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN @EventTrackSessions ETS ON TM.MappedItemID = CONVERT(VARCHAR(36), ETS.EventID)
+		WHERE TM.MappedItemType IN ('ILT Event')
+		
+		OPEN C_EventTrackSessions
+		FETCH NEXT FROM C_EventTrackSessions INTO @MappedItemID, @UserID, @OneOrAll
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+			IF @OneOrAll = 1
+			BEGIN
+				IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Completed')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						EventStatus = 'Completed'
+					WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID
+						AND UserID = @UserID
+
+					UPDATE ETS SET
+						EventCompletedDate = (SELECT MAX(ETS1.SessionEndDate) FROM @EventTrackSessions ETS1 WHERE ETS1.EventID = ETS.EventID AND ETS1.UserID = ETS.UserID AND ETS1.SessionStatus = 'Completed')
+					FROM @EventTrackSessions ETS
+					WHERE CONVERT(VARCHAR(36), ETS.EventID) = @MappedItemID
+						AND ETS.UserID = @UserID							
+				END
+				ELSE IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Exempt')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						EventStatus = 'Exempt'
+					WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID
+						AND UserID = @UserID
+
+					UPDATE ETS SET
+						EventCompletedDate = (SELECT MAX(ETS1.SessionEndDate) FROM @EventTrackSessions ETS1 WHERE ETS1.EventID = ETS.EventID AND ETS1.UserID = ETS.UserID AND ETS1.SessionStatus = 'Exempt')
+					FROM @EventTrackSessions ETS
+					WHERE CONVERT(VARCHAR(36), ETS.EventID) = @MappedItemID
+						AND ETS.UserID = @UserID						
+				END
+				ELSE
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						EventStatus = 'Incomplete'
+					WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID
+						AND UserID = @UserID
+						--AND EventStatus IS NULL
+				END
+			END
+			ELSE
+			BEGIN
+				IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Incomplete')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						EventStatus = 'Incomplete'
+					WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID
+						AND UserID = @UserID	
+				END	
+				ELSE IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Exempt')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						EventStatus = 'Exempt'
+					WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID
+						AND UserID = @UserID	
+				END	
+				ELSE
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						EventStatus = 'Completed'
+					WHERE CONVERT(VARCHAR(36), EventID) = @MappedItemID
+						AND UserID = @UserID
+						--AND EventStatus IS NULL
+
+					UPDATE ETS SET
+						EventCompletedDate = (SELECT MAX(ETS1.SessionEndDate) FROM @EventTrackSessions ETS1 WHERE ETS1.EventID = ETS.EventID AND ETS1.UserID = ETS.UserID AND ETS1.SessionStatus = 'Completed')
+					FROM @EventTrackSessions ETS
+					WHERE CONVERT(VARCHAR(36), ETS.EventID) = @MappedItemID
+						AND ETS.UserID = @UserID
+				END
+			END
+			
+			FETCH NEXT FROM C_EventTrackSessions INTO @MappedItemID, @UserID, @OneOrAll
+		END
+		CLOSE C_EventTrackSessions
+		DEALLOCATE C_EventTrackSessions
+
+		DECLARE C_EventTrackSessions CURSOR LOCAL FAST_FORWARD FOR
+		SELECT TM.MappedItemID, ETS.UserID, TM.OneOrAll
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN @EventTrackSessions ETS ON TM.MappedItemID = CONVERT(VARCHAR(36), ETS.TrackID)
+		WHERE TM.MappedItemType IN ('ILT Track')
+		
+		OPEN C_EventTrackSessions
+		FETCH NEXT FROM C_EventTrackSessions INTO @MappedItemID, @UserID, @OneOrAll
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+			IF @OneOrAll = 1
+			BEGIN			
+				IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Completed')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						TrackStatus = 'Completed'
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND UserID = @UserID 
+
+					UPDATE ETS SET
+						EventCompletedDate = (SELECT MIN(ETS1.SessionEndDate) FROM @EventTrackSessions ETS1 WHERE ETS1.TrackID = ETS.TrackID AND ETS1.UserID = ETS.UserID AND ETS1.SessionStatus = 'Completed')
+					FROM @EventTrackSessions ETS
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND ETS.UserID = @UserID							
+				END
+				ELSE IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Exempt')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						TrackStatus = 'Exempt'
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND UserID = @UserID
+
+					UPDATE ETS SET
+						EventCompletedDate = (SELECT MAX(ETS1.SessionEndDate) FROM @EventTrackSessions ETS1 WHERE ETS1.TrackID = ETS.TrackID AND ETS1.UserID = ETS.UserID AND ETS1.SessionStatus = 'Exempt')
+					FROM @EventTrackSessions ETS
+					WHERE CONVERT(VARCHAR(36), ETS.TrackID) = @MappedItemID
+						AND ETS.UserID = @UserID						
+				END
+				ELSE
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						TrackStatus = 'Incomplete'
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND UserID = @UserID 	
+						--AND TrackStatus IS NULL
+				END
+			END
+			ELSE 
+			BEGIN					
+				IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Incomplete')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						TrackStatus = 'Incomplete'
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID	
+						AND UserID = @UserID 
+				END	
+				ELSE IF EXISTS (SELECT 1 FROM @EventTrackSessions ETS WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID AND ETS.UserID = @UserID AND ETS.SessionStatus = 'Exempt')
+				BEGIN
+					UPDATE @EventTrackSessions SET
+						TrackStatus = 'Exempt'
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND UserID = @UserID	
+				END	
+				ELSE
+				BEGIN	
+					UPDATE @EventTrackSessions SET
+						TrackStatus = 'Completed'
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND UserID = @UserID 
+						-- AND TrackStatus IS NULL
+
+					UPDATE ETS SET
+						EventCompletedDate = (SELECT MAX(ETS1.SessionEndDate) FROM @EventTrackSessions ETS1 WHERE ETS1.TrackID = ETS.TrackID AND ETS1.UserID = ETS.UserID AND ETS1.SessionStatus = 'Completed')
+					FROM @EventTrackSessions ETS
+					WHERE CONVERT(VARCHAR(36), TrackID) = @MappedItemID
+						AND ETS.UserID = @UserID	
+				END
+			END
+			FETCH NEXT FROM C_EventTrackSessions INTO @MappedItemID, @UserID, @OneOrAll
+		END
+		CLOSE C_EventTrackSessions
+		DEALLOCATE C_EventTrackSessions
+	END
+	
+	IF EXISTS (SELECT 1 FROM @TrainingOfferingMappings WHERE MappedItemType IN ('Test Instance'))
+	BEGIN
+		INSERT INTO @UserAssignments(UserID, TestInstanceID, PointValue, Grade, DateSubmitted,Status)
+		SELECT UA.User_ID, UA.Test_Instance_ID, ISNULL(UA.Point_Value, 0), UA.Grade, MAX(UA.Date_Submitted),UA.Status
+		FROM User_Assignments UA (NOLOCK)
+			INNER JOIN @TrainingOfferingMappings TM ON MappedItemType IN ('Test Instance') AND CONVERT(VARCHAR(36), UA.Test_Instance_ID) = TM.MappedItemID
+			INNER JOIN @User U ON UA.User_ID = U.UserID
+		WHERE UA.Status = 'gradedtest'
+			AND UA.Test_Instance_ID <> 0
+			AND UA.Grade/(CASE WHEN ISNULL(UA.Point_Value, 1) = 0 THEN 1 ELSE ISNULL(UA.Point_Value, 1) END)
+				= (	SELECT MAX(UA1.Grade/(CASE WHEN ISNULL(UA1.Point_Value, 1) = 0 THEN 1 ELSE ISNULL(UA1.Point_Value, 1) END)) 
+					FROM User_Assignments UA1 
+						INNER JOIN Test_Instances TI1 ON UA1.Test_Instance_ID = TI1.Test_Instance_ID
+					WHERE UA1.Test_Instance_ID = UA.Test_Instance_ID
+						AND UA1.User_ID = UA.User_ID
+						AND UA1.Status = 'gradedtest'
+					GROUP BY UA1.Test_Instance_ID, UA1.User_ID)
+		GROUP BY UA.User_ID, UA.Test_Instance_ID, ISNULL(UA.Point_Value, 0), UA.Grade,UA.Status
+		
+		INSERT INTO @UserAssignments(UserID, TestInstanceID, PointValue, Grade, DateSubmitted,Status)
+		SELECT UA.User_ID, UA.Test_Instance_ID, ISNULL(UA.Point_Value, 0), UA.Grade, MAX(UA.Date_Submitted),UA.Status
+		FROM User_Assignments UA (NOLOCK)
+			INNER JOIN @TrainingOfferingMappings TM ON MappedItemType IN ('Test Instance') AND CONVERT(VARCHAR(36), UA.Test_Instance_ID) = TM.MappedItemID
+			INNER JOIN @User U ON UA.User_ID = U.UserID
+		WHERE UA.Status = 'exempt'
+			AND UA.Test_Instance_ID <> 0
+			AND UA.Grade/(CASE WHEN ISNULL(UA.Point_Value, 1) = 0 THEN 1 ELSE ISNULL(UA.Point_Value, 1) END)
+				= (	SELECT MAX(UA1.Grade/(CASE WHEN ISNULL(UA1.Point_Value, 1) = 0 THEN 1 ELSE ISNULL(UA1.Point_Value, 1) END)) 
+					FROM User_Assignments UA1 
+						INNER JOIN Test_Instances TI1 ON UA1.Test_Instance_ID = TI1.Test_Instance_ID
+					WHERE UA1.Test_Instance_ID = UA.Test_Instance_ID
+						AND UA1.User_ID = UA.User_ID
+						AND UA1.Status = 'exempt'
+					GROUP BY UA1.Test_Instance_ID, UA1.User_ID)
+		GROUP BY UA.User_ID, UA.Test_Instance_ID, ISNULL(UA.Point_Value, 0), UA.Grade,UA.Status
+		
+		IF @ibDebugFlag = 1
+		BEGIN
+			SELECT * FROM @UserAssignments
+		END
+	END
+
+	-- INSERT completed courses
+	INSERT INTO @CourseStatus(CourseID, UserID, CourseStatusID,Status)
+	SELECT CS.Course_ID, CS.User_ID, MIN(Course_Status_ID),CS.StatusID
+	FROM Course_Status CS (NOLOCK)
+		INNER JOIN @TrainingOfferingMappings TM ON TM.MappedItemID = CONVERT(VARCHAR(36), CS.Course_ID) AND TM.MappedItemType = 'Course'
+		INNER JOIN @User U ON U.UserID = CS.User_ID
+	WHERE ISNULL(CS.ExpirationDate, GETDATE()) >= GETDATE() --10.0.3
+		AND CS.Date_Completed IS NOT NULL
+	GROUP BY CS.Course_ID, CS.User_ID, CS.StatusID
+
+	-- INSERT incomplete courses
+	INSERT INTO @CourseStatus(CourseID, UserID, CourseStatusID,Status)
+	SELECT CS.Course_ID, CS.User_ID, MIN(Course_Status_ID),CS.StatusID
+	FROM Course_Status CS (NOLOCK)
+		INNER JOIN @TrainingOfferingMappings TM ON TM.MappedItemID = CONVERT(VARCHAR(36), CS.Course_ID) AND TM.MappedItemType = 'Course'
+		INNER JOIN @User U ON U.UserID = CS.User_ID
+	WHERE ISNULL(CS.ExpirationDate, GETDATE()) >= GETDATE()  	
+		AND CS.Date_Completed IS NULL
+		AND NOT EXISTS (SELECT 1 FROM @CourseStatus CS1
+						WHERE CS1.CourseID = CS.Course_ID
+							AND CS1.UserID = CS.User_ID)
+	GROUP BY CS.Course_ID, CS.User_ID, CS.StatusID
+
+	-- Update course status TABLE with missing data
+	UPDATE CS1 SET
+		PercentComplete = CONVERT(DECIMAL(7,4), ROUND(CS.Percent_Complete, 4)), 
+		MasteryScore = CS.Mastery_Score,
+		DateCompleted = CS.Date_Completed,
+		DateStarted = CS.Date_Started,
+		ExpirationDate = CS.ExpirationDate,
+		StatusID = CS.StatusID
+	FROM @CourseStatus CS1 INNER JOIN Course_Status CS ON CS1.CourseStatusID = CS.Course_Status_ID
+	
+	-- INSERT completed classes
+	INSERT INTO @ClassStatus(ClassID, UserID, ClassStatusID)
+	SELECT CS.Class_ID, CS.User_ID, MIN(Class_Status_ID)
+	FROM Class_Status CS (NOLOCK)
+		INNER JOIN @TrainingOfferingMappings TM ON TM.MappedItemID = CONVERT(VARCHAR(36), CS.Class_ID) AND TM.MappedItemType = 'Class'
+		INNER JOIN @User U ON U.UserID = CS.User_ID
+	WHERE ISNULL(CS.ExpirationDate, GETDATE()) >= GETDATE() --10.0.3
+		AND CS.Date_Completed IS NOT NULL
+	GROUP BY CS.Class_ID, CS.User_ID
+
+	-- INSERT incomplete classes
+	INSERT INTO @ClassStatus(ClassID, UserID, ClassStatusID)
+	SELECT CS.Class_ID, CS.User_ID, MIN(Class_Status_ID)
+	FROM Class_Status CS (NOLOCK)
+		INNER JOIN @TrainingOfferingMappings TM ON TM.MappedItemID = CONVERT(VARCHAR(36), CS.Class_ID) AND TM.MappedItemType = 'Class'
+		INNER JOIN @User U ON U.UserID = CS.User_ID
+	WHERE ISNULL(CS.ExpirationDate, GETDATE()) >= GETDATE()  	
+		AND CS.Date_Completed IS NULL
+		AND NOT EXISTS (SELECT 1 FROM @ClassStatus CS1
+						WHERE CS1.ClassID = CS.Class_ID
+							AND CS1.UserID = CS.User_ID)
+	GROUP BY CS.Class_ID, CS.User_ID
+
+	-- Update class status TABLE with missing data
+	UPDATE CS1 SET
+		PercentComplete = CONVERT(DECIMAL(7,4), ROUND(CS.Percent_Complete, 4)), 
+		Score = CS.Score,
+		DateCompleted = CS.Date_Completed,
+		DateStarted = CS.Date_Started,
+		ExpirationDate = CS.ExpirationDate		
+	FROM @ClassStatus CS1 INNER JOIN Class_Status CS ON CS1.ClassStatusID = CS.Class_Status_ID
+
+	IF @ibDebugFlag = 1
+	BEGIN
+		SELECT * FROM @TrainingOfferingMappings
+	END
+	
+	-- INSERT data into Final TABLE
+	-- -- Classes
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemScore, 
+			MappedItemPercentComplete, MappedItemDueDate, MappedItemExpirationDate, MappedItemID, MappedItemLastUpdate, MappedItemAttemptID)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription,TM.MappedItemType, TM.MappedItemTypeID, NULL, CS.DateStarted, CS.DateCompleted,
+			(CASE WHEN CS.ClassID IS NULL THEN 'Not Attempted'             
+				  WHEN CS.ClassID IS NOT NULL AND CS.DateCompleted IS NOT NULL THEN 'Completed'          
+				  WHEN CS.ClassID IS NOT NULL AND CS.DateCompleted IS NULL THEN 'Incomplete'            
+			ELSE 'Incomplete'            
+			END), 
+			CONVERT(VARCHAR(30), CS.Score) + '%', CS.PercentComplete * 100, TM.MappedItemDueDate, CS.ExpirationDate,
+			TM.MappedItemID, TM.MappedItemLastUpdate, CS.ClassStatusID
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1
+			LEFT OUTER JOIN @ClassStatus CS ON CS.ClassID = TM.MappedItemID AND CS.UserID = U.UserID
+		WHERE TM.MappedItemType = 'Class'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemScore, 
+			MappedItemPercentComplete, MappedItemDueDate, MappedItemExpirationDate, MappedItemID, MappedItemLastUpdate, MappedItemAttemptID)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, NULL, CS.DateStarted, CS.DateCompleted,
+			(CASE WHEN CS.ClassID IS NULL THEN 'Not Attempted'             
+				  WHEN CS.ClassID IS NOT NULL AND CS.DateCompleted IS NOT NULL THEN 'Completed'          
+				  WHEN CS.ClassID IS NOT NULL AND CS.DateCompleted IS NULL THEN 'Incomplete'            
+			ELSE 'Incomplete'            
+			END), 
+			CONVERT(VARCHAR(30), CS.Score) + '%', CS.PercentComplete * 100, TM.MappedItemDueDate, CS.ExpirationDate,
+			TM.MappedItemID, TM.MappedItemLastUpdate, CS.ClassStatusID
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+			LEFT OUTER JOIN @ClassStatus CS ON CS.ClassID = TM.MappedItemID AND CS.UserID = U.UserID
+		WHERE TM.MappedItemType = 'Class'
+	END
+
+	-- -- Courses
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemScore, 
+			MappedItemPercentComplete, MappedItemDueDate, MappedItemExpirationDate, MappedItemID, MappedItemLastUpdate, MappedItemAttemptID)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, NULL, CS.DateStarted, CS.DateCompleted,  
+				S.[Description],			
+			(CASE WHEN CS.MasteryScore IN (0, -1) THEN ''
+   					WHEN CS.MasteryScore BETWEEN 0 AND 1 THEN CONVERT(VARCHAR(30), (CS.MasteryScore * 100)) + '%'
+					ELSE CONVERT(VARCHAR(30), CS.MasteryScore) + '%' END),
+			CS.PercentComplete * 100, TM.MappedItemDueDate, CS.ExpirationDate,
+			TM.MappedItemID, TM.MappedItemLastUpdate, CS.CourseStatusID  
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1
+			LEFT OUTER JOIN @CourseStatus CS ON CONVERT(VARCHAR(36), CS.CourseID) = TM.MappedItemID AND CS.[UserID] = U.UserID
+			INNER JOIN vw_CompletionStatus S ON S.CompletionStatusID  = ISNULL(CS.StatusID, 5) AND TypeID = 4 
+		WHERE TM.MappedItemType = 'Course'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemScore, 
+			MappedItemPercentComplete, MappedItemDueDate, MappedItemExpirationDate, MappedItemID, MappedItemLastUpdate, MappedItemAttemptID)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, NULL, CS.DateStarted, CS.DateCompleted,  
+			S.[Description],	
+			(CASE WHEN CS.MasteryScore IN (0, -1) THEN ''
+   					WHEN CS.MasteryScore BETWEEN 0 AND 1 THEN CONVERT(VARCHAR(30), (CS.MasteryScore * 100)) + '%'
+					ELSE CONVERT(VARCHAR(30), CS.MasteryScore) + '%' END),
+			CS.PercentComplete * 100, TM.MappedItemDueDate, CS.ExpirationDate,
+			TM.MappedItemID, TM.MappedItemLastUpdate, CS.CourseStatusID
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+			LEFT OUTER JOIN @CourseStatus CS ON CONVERT(VARCHAR(36), CS.CourseID) = TM.MappedItemID AND CS.[UserID] = U.UserID
+			INNER JOIN vw_CompletionStatus S ON S.CompletionStatusID  = ISNULL(CS.StatusID, 5) AND TypeID = 4 
+		WHERE TM.MappedItemType = 'Course'
+	END
+
+	-- -- Enrollments
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemPreStatus, MappedItemPostStatus, 
+			MappedItemDueDate, MappedItemID, MappedItemEnrolledDate, MappedItemStartedDate, MappedItemLastUpdate, UserEnrollmentLastChangeDate, MappedItemAttemptID)	
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, 
+			(CASE WHEN EU.Enrollment_ID IS NOT NULL AND EU.Status IN (2,6) THEN EU.ApprovedDate ELSE NULL END),   
+			(CASE
+				WHEN EU.Enrollment_ID IS NOT NULL AND EU.Post_Status IN (0,2) 
+					AND (	(EnrollmentEventStopDate IS NULL AND EnrollmentEventStartDate <= GETDATE()) 
+						 OR (EnrollmentEventStopDate IS NOT NULL AND EnrollmentEventStopDate <= GETDATE())
+						) THEN ISNULL(EnrollmentEventStopDate, EU.Last_Status_Change)
+				ELSE NULL
+			END),
+			(CASE
+				WHEN EU.Enrollment_ID IS NOT NULL AND EU.Post_Status IN (0,2) 
+					AND (	(EnrollmentEventStopDate IS NULL AND EnrollmentEventStartDate <= GETDATE()) 
+						 OR (EnrollmentEventStopDate IS NOT NULL AND EnrollmentEventStopDate <= GETDATE())
+						) THEN 'Completed'
+                WHEN EU.Post_Status = 8 THEN 'Exempt'
+				ELSE 'Incomplete'
+			END), dbo.lc_fn_ParseEnrollmentStatus(EU.Status, 1), dbo.lc_fn_ParseEnrollmentStatus(EU.Post_Status, 0), TM.MappedItemDueDate,
+			TM.MappedItemID, (CASE WHEN EU.Enrollment_ID IS NOT NULL AND EU.Status IN (2,6) THEN EU.ApprovedDate ELSE NULL END), 
+			TM.EnrollmentEventStartDate, TM.MappedItemLastUpdate,
+			(CASE WHEN EU.Post_Status IN (0, 2) AND TM.EnrollmentEventType IN (5, 17, 34) AND TM.EnrollmentEventStopDate < GETDATE() THEN TM.EnrollmentEventStopDate		
+				  WHEN EU.Post_Status IN (0, 2) AND TM.EnrollmentEventType <> 5 THEN EU.Last_Status_Change	
+				  ELSE NULL END), EU.Enrollment_User_ID
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM (NOLOCK) ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1
+			LEFT OUTER JOIN Enrollment_Users EU (NOLOCK) ON CONVERT(VARCHAR(36), EU.Enrollment_ID) = TM.MappedItemID AND EU.[User_ID] = U.UserID
+		WHERE TM.MappedItemType = 'Enrollment'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemPreStatus, MappedItemPostStatus, 
+			MappedItemDueDate, MappedItemID, MappedItemEnrolledDate, MappedItemStartedDate, MappedItemLastUpdate, UserEnrollmentLastChangeDate, MappedItemAttemptID)	
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID,  
+			(CASE WHEN EU.Enrollment_ID IS NOT NULL AND EU.Status IN (2,6) THEN EU.ApprovedDate ELSE NULL END),   
+			(CASE
+				WHEN EU.Enrollment_ID IS NOT NULL AND EU.Post_Status IN (0,2) 
+					AND (	(EnrollmentEventStopDate IS NULL AND EnrollmentEventStartDate <= GETDATE()) 
+						 OR (EnrollmentEventStopDate IS NOT NULL AND EnrollmentEventStopDate <= GETDATE())
+						) THEN ISNULL(EnrollmentEventStopDate, EU.Last_Status_Change)
+				ELSE NULL
+			END),
+			(CASE
+				WHEN EU.Enrollment_ID IS NOT NULL AND EU.Post_Status IN (0,2) 
+					AND (	(EnrollmentEventStopDate IS NULL AND EnrollmentEventStartDate <= GETDATE()) 
+						 OR (EnrollmentEventStopDate IS NOT NULL AND EnrollmentEventStopDate <= GETDATE())
+						) THEN 'Completed'
+                WHEN EU.Post_Status = 8 THEN 'Exempt'
+				ELSE 'Incomplete'
+			END), dbo.lc_fn_ParseEnrollmentStatus(EU.Status, 1), dbo.lc_fn_ParseEnrollmentStatus(EU.Post_Status, 0), TM.MappedItemDueDate,
+			TM.MappedItemID, (CASE WHEN EU.Enrollment_ID IS NOT NULL AND EU.Status IN (2,6) THEN EU.ApprovedDate ELSE NULL END),  
+			TM.EnrollmentEventStartDate, TM.MappedItemLastUpdate,
+			(CASE WHEN EU.Post_Status IN (0, 2) AND TM.EnrollmentEventType IN (5, 17, 34) AND TM.EnrollmentEventStopDate < GETDATE() THEN TM.EnrollmentEventStopDate		
+				  WHEN EU.Post_Status IN (0, 2) AND TM.EnrollmentEventType <> 5 THEN EU.Last_Status_Change	
+				  ELSE NULL END), EU.Enrollment_User_ID
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM (NOLOCK) ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID
+			LEFT OUTER JOIN Enrollment_Users EU (NOLOCK) ON CONVERT(VARCHAR(36), EU.Enrollment_ID) = TM.MappedItemID AND EU.[User_ID] = U.UserID
+		WHERE TM.MappedItemType = 'Enrollment'
+	END
+
+	-- -- ILT Sessions
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, ETS.SessionStartDate, ETS.SessionEndDate,
+			ISNULL(SessionStatus, 'Incomplete'), TM.MappedItemDueDate, TM.MappedItemID, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1		
+			LEFT OUTER JOIN (SELECT DISTINCT SessionID, SessionStartDate, SessionEndDate, UserID, SessionStatus
+							 FROM @EventTrackSessions
+							) AS ETS ON CONVERT(VARCHAR(36), ETS.SessionID) = TM.MappedItemID AND ETS.UserID = U.UserID
+	
+		WHERE TM.MappedItemType = 'ILT Session'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, ETS.SessionStartDate, ETS.SessionEndDate,
+			ISNULL(SessionStatus, 'Incomplete'), TM.MappedItemDueDate, TM.MappedItemID, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+			LEFT OUTER JOIN (SELECT DISTINCT SessionID, SessionStartDate, SessionEndDate, UserID, SessionStatus
+							 FROM @EventTrackSessions
+							) AS ETS ON CONVERT(VARCHAR(36), ETS.SessionID) = TM.MappedItemID AND ETS.UserID = U.UserID
+	
+		WHERE TM.MappedItemType = 'ILT Session'
+	END
+
+	-- -- ILT Tracks   
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+				MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemOneOrAll, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, ETS.TrackStartDate, 
+			(CASE WHEN ISNULL(TrackStatus, 'Incomplete') = 'Incomplete' THEN NULL ELSE ETS.TrackEndDate END),
+			ISNULL(TrackStatus, 'Incomplete'), TM.MappedItemDueDate, TM.MappedItemID, TM.OneOrAll, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1		
+			LEFT OUTER JOIN (SELECT TrackID, MIN(SessionStartDate) AS TrackStartDate, ISNULL(MAX(TrackCompletedDate), MAX(SessionEndDate)) AS TrackEndDate, UserID, TrackStatus
+							 FROM @EventTrackSessions
+							 GROUP BY TrackID, UserID, TrackStatus
+							) AS ETS ON CONVERT(VARCHAR(36), ETS.TrackID) = TM.MappedItemID AND ETS.UserID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Track'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+				MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemOneOrAll, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, ETS.TrackStartDate, 
+			(CASE WHEN ISNULL(TrackStatus, 'Incomplete') = 'Incomplete' THEN NULL ELSE ETS.TrackEndDate END),
+			ISNULL(TrackStatus, 'Incomplete'), TM.MappedItemDueDate, TM.MappedItemID, TM.OneOrAll, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID	
+			LEFT OUTER JOIN (SELECT TrackID, MIN(SessionStartDate) AS TrackStartDate, ISNULL(MAX(TrackCompletedDate), MAX(SessionEndDate)) AS TrackEndDate, UserID, TrackStatus
+							 FROM @EventTrackSessions
+							 GROUP BY TrackID, UserID, TrackStatus
+							) AS ETS ON CONVERT(VARCHAR(36), ETS.TrackID) = TM.MappedItemID AND ETS.UserID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Track'
+	END
+
+	-- -- ILT Events    
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+				MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemOneOrAll, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, ETS.EventStartDate, 
+			(CASE WHEN ISNULL(EventStatus, 'Incomplete') = 'Incomplete' THEN NULL ELSE ETS.EventEndDate END),
+			ISNULL(EventStatus, 'Incomplete'), TM.MappedItemDueDate, TM.MappedItemID, TM.OneOrAll, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1		
+			LEFT OUTER JOIN (SELECT EventID, MIN(SessionStartDate) AS EventStartDate, ISNULL(MAX(EventCompletedDate), MAX(SessionEndDate)) AS EventEndDate, UserID, EventStatus
+							 FROM @EventTrackSessions
+							 GROUP BY EventID, UserID, EventStatus
+							) AS ETS ON CONVERT(VARCHAR(36), ETS.EventID) = TM.MappedItemID AND ETS.UserID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Event'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+				MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemOneOrAll, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, ETS.EventStartDate, 
+			(CASE WHEN ISNULL(EventStatus, 'Incomplete') = 'Incomplete' THEN NULL ELSE ETS.EventEndDate END),
+			ISNULL(EventStatus, 'Incomplete'), TM.MappedItemDueDate, TM.MappedItemID, TM.OneOrAll, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+			LEFT OUTER JOIN (SELECT EventID, MIN(SessionStartDate) AS EventStartDate, ISNULL(MAX(EventCompletedDate), MAX(SessionEndDate)) AS EventEndDate, UserID, EventStatus
+							 FROM @EventTrackSessions
+							 GROUP BY EventID, UserID, EventStatus
+							) AS ETS ON CONVERT(VARCHAR(36), ETS.EventID) = TM.MappedItemID AND ETS.UserID = U.UserID
+		WHERE TM.MappedItemType = 'ILT Event'
+	END
+
+	-- -- Test Instances   
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults
+		(
+			UserID, 
+			TrainingOfferingID, 
+			TrainingOfferingName, 
+			TrainingOfferingAssignedDate, 
+			MappedItemName, 
+			MappedItemDescription, 
+			MappedItemType, 
+			MappedItemTypeID, 
+			MappedItemAssignedDate, 
+			MappedItemCompletedDate, 
+			MappedItemStatus, 
+			MappedItemScore, 
+			MappedItemDueDate, 
+			MappedItemID, 
+			MappedItemLastUpdate, 
+			MappedItemAttemptID
+		)
+		SELECT 
+			TUMBLER.UserID, 
+			TUMBLER.TrainingOfferingID, 
+			TUMBLER.TrainingOfferingName, 
+			TUM.AssignedDate, 
+			TUMBLER.MappedItemName, 
+			TUMBLER.MappedItemDescription, 
+			TUMBLER.MappedItemType, 
+			TUMBLER.MappedItemTypeID, 
+			TUM.AssignedDate, 
+			COALESCE(TUM.CompletedDate, UA.DateSubmitted),
+			CASE 
+				WHEN UA.DateSubmitted IS NULL AND ISNULL(UA.Status, '') <> 'Exempt' THEN 'Incomplete'
+                WHEN UA.Status = 'Exempt' THEN 'Exempt'
+				ELSE 'Completed'
+			END, 
+			CASE ISNULL(UA.PointValue, 0) 
+				WHEN 0 THEN NULL
+				ELSE CONVERT(VARCHAR(30), CONVERT(INT,UA.Grade)) + '' + CONVERT(VARCHAR(30), CONVERT(INT,UA.PointValue)) + ' (' + CONVERT(VARCHAR(30), CEILING(CONVERT(FLOAT, UA.Grade * 100) / UA.PointValue)) + '%)'
+			 END,
+			TUMBLER.MappedItemDueDate, 
+			TUMBLER.MappedItemID, 
+			TUMBLER.MappedItemLastUpdate, 
+			UA.UserAssignmentID
+		FROM 
+			( 
+				SELECT
+					U.UserID,
+					TM.TrainingOfferingID,
+					TM.TrainingOfferingName,
+					TM.MappedItemName,
+					TM.MappedItemDescription,
+					TM.MappedItemType,
+					TM.MappedItemTypeID,
+					TM.MappedItemLastUpdate,
+					TM.MappedItemID,
+					TM.MappedItemDueDate
+				FROM
+					@TrainingOfferingMappings TM
+					CROSS JOIN @User U 
+			) TUMBLER
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM
+				ON TUMBLER.TrainingOfferingID = TUM.TrainingOfferingID 
+				AND TUMBLER.MappedItemID = TUM.CompletedItemID
+				AND TUMBLER.UserID = TUM.UserID
+				AND TUM.StatusFlag = 1 
+				AND TUM.CompletedItemTypeID = 36 -- test instance
+			LEFT OUTER JOIN @UserAssignments UA ON TUMBLER.MappedItemID = CONVERT(VARCHAR(36), UA.TestInstanceID) AND TUMBLER.UserId = UA.UserID
+		WHERE TUMBLER.MappedItemType = 'Test Instance'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults
+		(
+			UserID, 
+			TrainingOfferingID, 
+			TrainingOfferingName, 
+			TrainingOfferingAssignedDate, 
+			MappedItemName, 
+			MappedItemDescription, 
+			MappedItemType, 
+			MappedItemTypeID, 
+			MappedItemAssignedDate, 
+			MappedItemCompletedDate, 
+			MappedItemStatus, 
+			MappedItemScore, 
+			MappedItemDueDate, 
+			MappedItemID, 
+			MappedItemLastUpdate, 
+			MappedItemAttemptID
+		)
+		SELECT 
+			U.UserID, 
+			TM.TrainingOfferingID, 
+			TM.TrainingOfferingName, 
+			TUM.AssignedDate, 
+			TM.TrainingOfferingName, 
+			TM.MappedItemType, 
+			TM.MappedItemDescription, 
+			TM.MappedItemTypeID, 
+			COALESCE(TUMTESTCOMPLETED.AssignedDate, TUM.AssignedDate), 
+			COALESCE(TUMTESTCOMPLETED.CompletedDate, UA.DateSubmitted),
+			CASE 
+				WHEN UA.DateSubmitted IS NULL AND ISNULL(UA.Status, '') <> 'Exempt' THEN 'Incomplete'
+                WHEN UA.Status = 'Exempt' THEN 'Exempt'
+				ELSE 'Completed'
+			END, 
+			CASE ISNULL(UA.PointValue, 0) 
+				WHEN 0 THEN NULL
+				ELSE CONVERT(VARCHAR(30), CONVERT(INT,UA.Grade)) + '' + CONVERT(VARCHAR(30), CONVERT(INT,UA.PointValue)) + ' (' + CONVERT(VARCHAR(30), CEILING(CONVERT(FLOAT, UA.Grade * 100) / UA.PointValue)) + '%)'
+			END,
+			TM.MappedItemDueDate, 
+			TM.MappedItemID, 
+			TM.MappedItemLastUpdate, 
+			UA.UserAssignmentID
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+			LEFT OUTER JOIN @UserAssignments UA ON TM.MappedItemID = CONVERT(VARCHAR(36), UA.TestInstanceID) AND U.UserId = UA.UserID
+			LEFT OUTER JOIN TrainingOffering_User_Map TUMTESTCOMPLETED 
+				ON TM.TrainingOfferingID = TUMTESTCOMPLETED.TrainingOfferingID 
+				AND TM.MappedItemID = TUMTESTCOMPLETED.CompletedItemID
+				AND U.UserID = U.UserID
+				AND TUMTESTCOMPLETED.StatusFlag = 1 
+				AND TUMTESTCOMPLETED.CompletionStatusID = 0 
+				AND TUMTESTCOMPLETED.CompletedItemTypeID = 36 -- test instance
+		WHERE TM.MappedItemType = 'Test Instance'
+	END
+
+	-- -- External Training   
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+				MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemStartedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemExpirationDate, MappedItemID, MappedItemLastUpdate, MappedItemAttemptID)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, COALESCE(ETUM.StartDate, ET.StartDate), COALESCE(ETUM.EndDate, ET.EndDate),
+			(CASE WHEN COALESCE(ETUM.EndDate, ET.EndDate) IS NOT NULL THEN 'Completed' ELSE 'Incomplete' END), COALESCE(ETUM.ExpirationDate, ET.ExpirationDate), 
+			TM.MappedItemID, TM.MappedItemLastUpdate, ETUM.ExternalTrainingUserMapID
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+			LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1
+			LEFT OUTER JOIN ET_ExternalTrainingUserMap ETUM ON TM.MappedItemID = CONVERT(VARCHAR(36), ETUM.ExternalTrainingID) AND U.UserID = ETUM.UserID AND ETUM.StatusFlag = 1
+			LEFT OUTER JOIN ET_ExternalTraining ET ON ET.ExternalTrainingID = ETUM.ExternalTrainingID
+		WHERE TM.MappedItemType = 'External Training'
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+				MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemDueDate, MappedItemID, MappedItemLastUpdate, MappedItemAttemptID)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, COALESCE(ETUM.StartDate, ET.StartDate), COALESCE(ETUM.EndDate, ET.EndDate),
+			(CASE WHEN COALESCE(ETUM.EndDate, ET.EndDate) IS NOT NULL THEN 'Completed' ELSE 'Incomplete' END), COALESCE(ETUM.ExpirationDate, ET.ExpirationDate), 
+			TM.MappedItemID, TM.MappedItemLastUpdate, ETUM.ExternalTrainingUserMapID
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+			LEFT OUTER JOIN ET_ExternalTrainingUserMap ETUM ON TM.MappedItemID = CONVERT(VARCHAR(36), ETUM.ExternalTrainingID) AND U.UserID = ETUM.UserID AND ETUM.StatusFlag = 1
+			LEFT OUTER JOIN ET_ExternalTraining ET ON ET.ExternalTrainingID = ETUM.ExternalTrainingID
+		WHERE TM.MappedItemType = 'External Training'
+	END
+
+	IF @ibDebugFlag = 1
+	BEGIN
+		SELECT '1'
+		SELECT * FROM @ReturnResults
+	END
+
+	-- -- No item mapped to dev plan   
+	IF ISNULL(@ibShowOnlyMappedUsers, 0) = 0
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemScore, MappedItemDueDate, MappedItemID, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, TM.MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, TUM.AssignedDate, NULL, 'Completed', 
+			NULL, TM.MappedItemDueDate, TM.MappedItemID, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			CROSS JOIN @User U 
+				LEFT OUTER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.UserID = U.UserID AND TUM.StatusFlag = 1		
+		WHERE ISNULL(TM.MappedItemType, '') = ''
+	END
+	ELSE
+	BEGIN
+		INSERT INTO @ReturnResults(UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingAssignedDate, 
+			MappedItemName, MappedItemDescription, MappedItemType, MappedItemTypeID, MappedItemAssignedDate, MappedItemCompletedDate, MappedItemStatus, MappedItemScore, MappedItemDueDate, MappedItemID, MappedItemLastUpdate)
+		SELECT U.UserID, TM.TrainingOfferingID, TM.TrainingOfferingName, TUM.AssignedDate, TM.MappedItemName, MappedItemDescription, TM.MappedItemType, TM.MappedItemTypeID, TUM.AssignedDate, NULL, 'Completed', 
+			NULL, TM.MappedItemDueDate, TM.MappedItemID, TM.MappedItemLastUpdate
+		FROM @TrainingOfferingMappings TM
+			INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = TM.TrainingOfferingID AND TUM.StatusFlag = 1
+			INNER JOIN @User U ON U.UserID = TUM.UserID		
+		WHERE ISNULL(TM.MappedItemType, '') = ''
+	END
+
+	IF @ibDebugFlag = 1
+	BEGIN
+		SELECT * FROM @ReturnResults
+	END
+
+	IF @ibReturnCompletionStatus = 1
+	BEGIN
+		IF (@ibRecalculateFlag != 1)
+		BEGIN
+			UPDATE RR SET 
+				TrainingOfferingStatus = CS.Description,
+				TrainingOfferingCompletedDate = (CASE CS.Description WHEN 'Completed' THEN TUM.CompletedDate ELSE NULL END)
+			FROM @ReturnResults RR
+				INNER JOIN TrainingOffering_User_Map TUM ON TUM.TrainingOfferingID = RR.TrainingOfferingID AND TUM.UserID = RR.UserID AND TUM.StatusFlag = 1 
+				INNER JOIN vw_CompletionStatus CS ON CS.TypeID = 71 AND CS.CompletionStatusID = TUM.CompletionStatusID
+		END
+		
+		DECLARE C_TrainingOfferings CURSOR LOCAL FAST_FORWARD FOR
+		SELECT DISTINCT RR.TrainingOfferingID, RR.UserID, MIN(RR.MappedItemCompletedDate) AS MinMappedItemCompletedDate, MIN(RR.MappedItemStartedDate) AS MinMappedItemStartedDate
+		FROM @ReturnResults RR
+		WHERE RR.TrainingOfferingStatus IS NULL
+		GROUP BY RR.TrainingOfferingID, RR.UserID   
+		
+		OPEN C_TrainingOfferings
+		FETCH NEXT FROM C_TrainingOfferings INTO @TrainingOfferingID, @UserID, @MinMappedItemCompletedDate, @MinMappedItemStartedDate
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+			-- Update Started Date, ItemID, ItemTypeID, ItemAttemptID
+			UPDATE @ReturnResults SET 
+				TrainingOfferingStartedDate = @MinMappedItemStartedDate,
+				TrainingOfferingCompletedItemID = MappedItemID, 
+				TrainingOfferingCompletedItemTypeIID = MappedItemTypeID,
+				TrainingOfferingCompletedItemAttemptID = MappedItemAttemptID
+			WHERE TrainingOfferingID = @TrainingOfferingID 
+				AND UserID = @UserID
+				AND MappedItemCompletedDate = @MinMappedItemCompletedDate
+					
+			IF EXISTS (SELECT 1 FROM @ReturnResults WHERE MappedItemStatus = 'Completed' AND TrainingOfferingID = @TrainingOfferingID AND UserID = @UserID)
+			BEGIN
+				SET @CompletionStatus = 'Completed'
+				UPDATE @ReturnResults SET 
+					TrainingOfferingStatus = @CompletionStatus,
+					TrainingOfferingCompletedDate = @MinMappedItemCompletedDate
+				WHERE TrainingOfferingID = @TrainingOfferingID 
+					AND UserID = @UserID
+				
+				SET @ovCompletionStatus  = @CompletionStatus
+				SET @odCompletedDate = @MinMappedItemCompletedDate
+			END
+			ELSE IF EXISTS (SELECT 1 FROM @ReturnResults WHERE MappedItemStatus = 'Exempt' AND TrainingOfferingID = @TrainingOfferingID AND UserID = @UserID AND ISNULL(TrainingOfferingStatus, '') <> 'Completed')
+			BEGIN
+				SELECT @CompletionStatus = (CASE OverallExemptStatus WHEN 0 THEN 'Completed' WHEN 1 THEN 'Incomplete' WHEN 8 THEN 'Exempt' END) FROM dbo.TrainingOffering (NOLOCK) WHERE TrainingOfferingID = @TrainingOfferingID
+				UPDATE @ReturnResults SET 
+					TrainingOfferingStatus = @CompletionStatus
+				WHERE TrainingOfferingID = @TrainingOfferingID 
+					AND UserID = @UserID
+				
+				SET @ovCompletionStatus  = @CompletionStatus
+				SET @odCompletedDate = NULL
+			END
+			ELSE
+			BEGIN
+				SET @CompletionStatus = 'Incomplete'
+				
+				UPDATE @ReturnResults SET 
+					TrainingOfferingStatus = @CompletionStatus
+				WHERE TrainingOfferingID = @TrainingOfferingID 
+					AND UserID = @UserID 
+					AND ISNULL(TrainingOfferingStatus, '') = ''
+					
+				SET @ovCompletionStatus  = @CompletionStatus
+				SET @odCompletedDate = NULL
+			END
+			
+			FETCH NEXT FROM C_TrainingOfferings INTO @TrainingOfferingID, @UserID, @MinMappedItemCompletedDate, @MinMappedItemStartedDate
+		END
+		CLOSE C_TrainingOfferings
+		DEALLOCATE C_TrainingOfferings				
+	END
+	
+	IF @ivSource = 'lc_sp_SC_UserLearningPlanItems'
+	BEGIN
+		IF object_id('tempdb..#TrainingOfferingResults') IS NOT NULL 
+		BEGIN
+			INSERT INTO #TrainingOfferingResults(UserID, TrainingOfferingID, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate)
+			SELECT DISTINCT UserID, TrainingOfferingID, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate				
+			FROM @ReturnResults
+		END
+	END
+		
+	-- Return data
+	IF @ibReturnMappedItems = 1
+	BEGIN
+		IF @ivSource = 'lc_sp_IOB_TrainingOfferingProgress'
+		BEGIN
+			SELECT UserID, MappedItemName, MappedItemType, MappedItemID, MappedItemDueDate, 
+				(CASE WHEN MappedItemStatus = 'Completed' THEN MappedItemCompletedDate ELSE NULL END) AS MappedItemCompletedDate, 
+				MappedItemStartedDate, 
+				CASE WHEN ISNULL(MappedItemID, '') = '' THEN ''
+					WHEN MappedItemStatus = 'Not Attempted' THEN 'Incomplete' 
+					WHEN MappedItemStatus = 'Submitted' THEN 'Incomplete'
+					WHEN MappedItemStatus = 'Returned' THEN 'Incomplete'  
+					ELSE MappedItemStatus END AS MappedItemStatus,
+				TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate
+			FROM @ReturnResults
+		END	
+		ELSE IF ( @ivSource = 'lc_sp_TrainingOffering_CompletionStatus_Upd' OR @ivSource = 'lc_sp_TrainingOffering_MapUserForExistingItems' )
+		BEGIN
+			SELECT UserID, TrainingOfferingID, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate, 
+				MappedItemID, MappedItemType, MappedItemTypeID, MappedItemStatus, MappedItemAssignedDate, MappedItemStartedDate, MappedItemCompletedDate, MappedItemDueDate, 
+				MappedItemExpirationDate, MappedItemEnrolledDate, TrainingOfferingCompletedItemID, TrainingOfferingCompletedItemTypeIID, TrainingOfferingCompletedItemAttemptID
+			FROM @ReturnResults
+		END
+		ELSE IF @ivSource = 'lc_sp_SC_UserLearningPlanItems'
+		BEGIN
+			INSERT INTO #TrainingOfferingResults(UserID, TrainingOfferingID, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate)
+			SELECT DISTINCT UserID, TrainingOfferingID, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate				
+			FROM @ReturnResults
+		END
+		ELSE
+		BEGIN
+			SELECT ResultID, UserID, TrainingOfferingID, TrainingOfferingName, TrainingOfferingStatus, TrainingOfferingAssignedDate, TrainingOfferingStartedDate, TrainingOfferingCompletedDate,   
+				MappedItemID, MappedItemName, MappedItemType, MappedItemStatus, MappedItemAssignedDate, 
+				MappedItemStartedDate, MappedItemCompletedDate, MappedItemDueDate, MappedItemExpirationDate, MappedItemOneOrAll, 
+				MappedItemScore, MappedItemPercentComplete, MappedItemRegistrationOpenDate, MappedItemRegistrationCloseDate, MappedItemEnrolledDate, MappedItemPreStatus, 
+				MappedItemPostStatus
+			FROM @ReturnResults
+		END
+	END
+	
+	IF @ovCompletionStatus IS NULL
+	BEGIN
+			
+		IF EXISTS(SELECT 1 FROM @ReturnResults WHERE TrainingOfferingStatus = 'Completed')
+		BEGIN
+			SELECT TOP 1 @ovCompletionStatus = TrainingOfferingStatus, @odCompletedDate = TrainingofferingCompletedDate
+			FROM @ReturnResults
+			WHERE TrainingOfferingStatus = 'Completed'
+	END
+		ELSE IF EXISTS(SELECT 1 FROM @ReturnResults WHERE TrainingOfferingStatus = 'Exempt')
+		BEGIN
+			SET @ovCompletionStatus = 'Exempt'
+		END
+		ELSE 
+		BEGIN
+			SET @ovCompletionStatus = 'Incomplete'
+		END
+	END
+
+END
+
+SET NOCOUNT OFF	
+SET ANSI_WARNINGS ON
+
+
+
+
+
+
+
+GO
+
+GRANT EXECUTE ON [dbo].[lc_sp_TrainingOffering_Items] TO [WebApp] AS [dbo]
+GO
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[lc_sp_UserSearch_Read]'))
+DROP PROCEDURE [dbo].[lc_sp_UserSearch_Read]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[lc_sp_UserSearch_Read]	
+( @XML XML 
+, @Debug BIT = 0
+)
+AS 
+/*****************************************************************************
+  SP Description:	Returns the users based on the given filter criteria
+
+  Revision History:@XML  
+  Version   Date		Developer  - Change Description  
+  12.X.1.TBD 07/29/2009 JT - Initial creation.  
+  13.1.9	01/07/2010	KGC - Changed the code to execute the dashboard code only if the Dashboard flag is passed.  
+  13.1.10	01/18/2010	JT - Fixed ambigous field error when filtering by custom field caused by missing prefix for User_ID  
+  13.1.11	01/27/2010	JT - Fixed issue with groups, removed call to function to get group_path_ID  
+  13.1.12	01/28/2010	JT - Appended Username to fields if missing  
+  13.1.13	02/05/2010	JT - Moved field UsernamePath to the end of the list  
+  13.1.14	02/06/2010	KGC - Improved the performance for the group search (C#26478)  
+  13.5.1	05/13/2010	Vishal - Added condition to handle extra ÔÇśANDÔÇÖ coming because of ÔÇśItem statusÔÇÖ (Fixed for census 30540)  
+  13.6.1	05/19/2010	KGC - Improved the skill score query performance.  
+  13.6.2	05/24/2010	Vishal - Added condition to handle extra ÔÇśORÔÇÖ coming because of ÔÇśItem statusÔÇÖ (Fixed for census 30540)  
+  13.8.1	07/06/2010	KGC - Fixed the Filter Condition  
+  13.8.2	08/11/2010	JT - Added condition for Ad-hoc status  
+  13.11.1	10/18/2010	Vishal- Fix for census #37199  
+  13.12.1	12/22/2010	JT - Added NOLOCK
+  14.1.1	01/06/2011	JQ - Added additional NOLOCK's
+  14.1.2	01/11/2011	JT - Increased AccountPermissions to VARCHAR(4000)
+  14.1.3	01/19/2011	TY - Increased Email2 to NVARCHAR(255) for consistency to the Users table C46632
+  14.1.4	01/11/2011	JT - Increased AccountPermissions to VARCHAR(MAX)
+  13.14.1	05/18/2011	AF - Replaced SP_SQLEXEC with SP_EXECUTESQL  
+  13.14.2	05/20/2011	MJR - (LEARN-1238) Changed variable to unicode variant for last sp_executesql statement
+  14.0.1	05/31/2011	AF - Removed SET ANSI_WARNINGS OFF from SP body
+  14.2		10/17/2011	JT - Added DirectReportID required for determining permissions for indirect reports
+  14.6.1	06/21/2012	KGC - Added support for new dynamic groups  
+  14.6.2	06/25/2012	KGC - Fixed the syntax error in dynamic sql
+  14.8.1	09/27/2012	KGC - Fixed the code to handle 0 for MaxSkillScore (LEARN-6998)
+  2013.21.0.0 04/22/2013  PS - Added UserNotesCount for performance tuning and get notes number one time for user
+  2013.21.0.0 04/23/2013  PS - filtering User_Group_Users for only active users (G.[User_ID] > 0)
+  2014.22.0.1	05/06/2014	JKosmala - XQuery instead of OpenXML - LEARN-10226
+  2014.31.0.1	08/07/2014	KKapusta - LEARN-13794: "culture aware" sorting added
+  2014.22.1.1 08/21/2014	JKosmala - LEARN-15080
+******************************************************************************/
+
+SET NOCOUNT ON
+
+DECLARE @Sql NVARCHAR(4000)
+DECLARE @Select NVARCHAR(1000)
+DECLARE @From NVARCHAR(1000)
+DECLARE @Where NVARCHAR(1000)
+DECLARE @Where2 NVARCHAR(1000)
+DECLARE @SortTable VARCHAR(50)
+DECLARE @Handle INT   
+DECLARE @SupervisorID NUMERIC    
+DECLARE @LCID NUMERIC
+DECLARE @Source VARCHAR(36)
+DECLARE @UserNameFirstLetter VARCHAR(10)
+DECLARE @GroupPathID VARCHAR(300)
+DECLARE @UserStatus VARCHAR(100)
+DECLARE @ItemType VARCHAR(36)
+DECLARE @ItemID VARCHAR(36)
+DECLARE @MappedItemType VARCHAR(36)
+DECLARE @MappedItemID VARCHAR(36)
+DECLARE @Fields NVARCHAR(4000)
+DECLARE @IncludeDirectReports BIT
+DECLARE @FilterString NVARCHAR(3000)
+DECLARE @PrimarySortField NVARCHAR(500)
+DECLARE @PrimarySortOrderBy NVARCHAR(500)
+DECLARE @SecondarySortField NVARCHAR(500)
+DECLARE @SecondarySortOrderBy NVARCHAR(500)
+DECLARE @PageNumber INT
+DECLARE @PageSize INT
+DECLARE @ShowDashboards VARCHAR(30)
+DECLARE @RecordCount INT
+DECLARE @SupervisorName NVARCHAR(100)
+DECLARE @SortingCultureCode VARCHAR(5)
+
+SET @Sql = ''
+SET @From = ''
+SET @Select = ''
+SET @Where = ''
+SET @Where2 = ''
+SET @SortTable = ''
+SET @UserNameFirstLetter = ''
+SET @UserStatus = ''
+SET @GroupPathID = ''
+
+SET @Source = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/Source') x(i))
+SET @SupervisorID = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/UserID') x(i))
+SET @LCID = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/LCID') x(i))
+SET @UserNameFirstLetter = (SELECT i.value('.', 'varchar(30)') Item FROM @XML.nodes('Params/UsernameFirstLetter') x(i))
+SET @UserStatus = (SELECT i.value('.', 'varchar(30)') Item FROM @XML.nodes('Params/UserStatus') x(i))
+SET @GroupPathID = (SELECT i.value('.', 'varchar(255)') Item FROM @XML.nodes('Params/GroupPathID') x(i))
+SET @ItemType = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/ItemType') x(i))
+SET @ItemID = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/ItemID') x(i))
+SET @MappedItemType = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/MappedItemType') x(i))
+SET @MappedItemID = (SELECT i.value('.', 'varchar(36)') Item FROM @XML.nodes('/Params/MappedItemID') x(i))
+SET @Fields = (SELECT i.value('.', 'varchar(4000)') Item FROM @XML.nodes('Params/Fields') x(i))
+SET @PrimarySortField = (SELECT i.value('.', 'nvarchar(500)') Item FROM @XML.nodes('Params/PagingSortingOptions/PrimarySort') x(i))
+SET @PrimarySortOrderBy = (SELECT i.value('.', 'nvarchar(500)') Item FROM @XML.nodes('Params/PagingSortingOptions/PrimaryOrderBy') x(i))
+SET @SecondarySortField = (SELECT i.value('.', 'nvarchar(500)') Item FROM @XML.nodes('Params/PagingSortingOptions/SecondarySort') x(i))
+SET @SecondarySortOrderBy = (SELECT i.value('.', 'nvarchar(500)') Item FROM @XML.nodes('Params/PagingSortingOptions/SecondaryOrderBy') x(i))
+SET @PageNumber = (SELECT i.value('.', 'nvarchar(500)') Item FROM @XML.nodes('Params/PagingSortingOptions/PageNumber') x(i))
+SET @PageSize = (SELECT i.value('.', 'nvarchar(4000)') Item FROM @XML.nodes('Params/PagingSortingOptions/PageSize') x(i))
+SET @SortingCultureCode = (SELECT i.value('.', 'varchar(5)') Item FROM @XML.nodes('Params/PagingSortingOptions/SortingCulture') x(i))
+SET @ShowDashboards = (SELECT i.value('.', 'nvarchar(4000)') Item FROM @XML.nodes('Params/ShowDashboards') x(i))
+
+IF @ShowDashboards = ''
+BEGIN
+	SET @ShowDashboards = 'true'
+END
+
+IF (SELECT i.value('.', 'varchar(50)') Item FROM @XML.nodes('Params/IncludeIndirectReports') x(i)) = 'true'
+BEGIN
+	SET @IncludeDirectReports = 1
+END
+ELSE
+BEGIN
+	SET @IncludeDirectReports = 0
+END
+
+-- Override the item id with mapped item id if mapped item id is passed.
+IF ISNULL(@MappedItemID, '') <> ''
+BEGIN
+	SET @ItemID = @MappedItemID
+	SET @ItemType = @MappedItemType
+END
+
+IF @GroupPathID <> '' AND dbo.lc_fn_LC_Group_GetConfiguration() <> '1'
+BEGIN	
+	SET @GroupPathID = RIGHT(@GroupPathID, LEN(@GroupPathID) -1)
+END
+
+IF (@Fields IS NULL OR @Fields = '') SET @Fields = '*'
+
+CREATE TABLE #Filter(FilterID INT IDENTITY(1, 1), FilterCondition VARCHAR(10), FilterFieldName NVARCHAR(100), FilterOperator VARCHAR(20), FilterValue NVARCHAR(50))
+
+-- Read filters
+INSERT INTO #Filter(FilterCondition, FilterFieldName, FilterOperator, FilterValue) 
+SELECT i.value('(./FilterCondition)[1]','varchar(10)') FilterConidition, i.value('(./FilterFieldName)[1]','NVARCHAR(100)') FilterFieldName,i.value('(./FilterOperator)[1]','VARCHAR(20)') FilterOperator,
+ i.value('(./FilterValue)[1]','NVARCHAR(50)') FilterValue FROM @XML.nodes('/Params/Filters') x(i)
+
+IF @ItemType = 'NA' DELETE FROM #Filter WHERE FilterFieldName = 'SkillScore'
+IF @ItemType = 'NA' DELETE FROM #Filter WHERE FilterFieldName = 'ItemStatus'
+
+EXEC lc_sp_rpt_Compliance_GetFilterString @FilterString OUTPUT
+SET @FilterString = Replace(@FilterString, '[User_ID]', 'U.[User_ID]')
+
+IF @DEBUG = 1
+BEGIN
+	PRINT 'FilterString = '  + @FilterString
+END
+
+CREATE TABLE #Users ([User_ID] NUMERIC,Username NVARCHAR(200),First_Name NVARCHAR(200),Last_Name NVARCHAR(200),Street_1 NVARCHAR(100),Street_2 NVARCHAR(100),City NVARCHAR(100),State_Province NVARCHAR(100),Postal_Code	NVARCHAR(100),Country	NVARCHAR(100),Day_Phone NVARCHAR(100),Eve_Phone NVARCHAR(100),Pager NVARCHAR(100),Interactive_Pager NVARCHAR(100),Mobile_Phone NVARCHAR(100),Fax NVARCHAR(100),EMail NVARCHAR(100),EMail2 NVARCHAR(255),SSN	NVARCHAR(100),Gender NVARCHAR(100),Nickname NVARCHAR(100),Spouse_Name NVARCHAR(100),Company NVARCHAR(100),Department NVARCHAR(100),	Job_Title NVARCHAR(100), Manager_Name NVARCHAR(100), Office NVARCHAR(100), Profession NVARCHAR(100), ItemType VARCHAR(100), ItemName NVARCHAR(100), ItemID VARCHAR(36), ItemStatus VARCHAR(100), SkillScore VARCHAR(36), ImageURLPath NVARCHAR(255), GroupNamePath NVARCHAR(4000), MemberStatus NVARCHAR(20), UsernamePath NVARCHAR(4000), SupervisorName NVARCHAR(100), DirectReportID NUMERIC, UserNotesCount NUMERIC)		
+CREATE TABLE #Training(UserID NUMERIC, ItemType VARCHAR(100), ItemName NVARCHAR(100), ItemID VARCHAR(36), ItemStatus VARCHAR(100),  SkillScore VARCHAR(36), MinSkillScore VARCHAR(36), MaxSkillScore VARCHAR(36))
+CREATE TABLE #Results ([User_ID] NUMERIC,Username NVARCHAR(200),First_Name NVARCHAR(200),Last_Name NVARCHAR(200),Street_1 NVARCHAR(100),Street_2 NVARCHAR(100),City NVARCHAR(100),State_Province NVARCHAR(100),Postal_Code	NVARCHAR(100),Country	NVARCHAR(100),Day_Phone NVARCHAR(100),Eve_Phone NVARCHAR(100),Pager NVARCHAR(100),Interactive_Pager NVARCHAR(100),Mobile_Phone NVARCHAR(100),Fax NVARCHAR(100),EMail NVARCHAR(100),EMail2 NVARCHAR(255),SSN	NVARCHAR(100),Gender NVARCHAR(100),Nickname NVARCHAR(100),Spouse_Name NVARCHAR(100),Company NVARCHAR(100),Department NVARCHAR(100),	Job_Title NVARCHAR(100), Manager_Name NVARCHAR(100), Office NVARCHAR(100), Profession NVARCHAR(100), ItemType VARCHAR(100), ItemName NVARCHAR(100), ItemID VARCHAR(36), ItemStatus VARCHAR(100), SkillScore VARCHAR(36), ImageURLPath NVARCHAR(255), GroupNamePath NVARCHAR(4000), MemberStatus NVARCHAR(20), UsernamePath NVARCHAR(4000), SupervisorName NVARCHAR(100), DirectReportID NUMERIC, UserNotesCount NUMERIC)		
+
+DECLARE @Items TABLE(ItemID VARCHAR(36), StatusID INT, UserCount INT)
+DECLARE @JobProfileSkillScore TABLE(JobProfileID VARCHAR(36), UserID NUMERIC, SkillScore NUMERIC(8, 0), MinSkillScore NUMERIC(8, 0), MaxSkillScore NUMERIC(8, 0))
+
+IF @Source = 'SupervisorUsers'
+BEGIN
+	CREATE TABLE #SupervisorUsers(Account_ID VARCHAR(36), Supervisor_First_Name NVARCHAR(200), Supervisor_Last_Name NVARCHAR(200), User_ID NUMERIC, User_First_Name NVARCHAR(200), User_Last_Name NVARCHAR(200), User_Username NVARCHAR(200), AccountPermissions VARCHAR(MAX), isPermissionsOverride BIT, LevelNo INT, HasChildren BIT, ParentUserID NUMERIC, UsernamePath NVARCHAR(4000), SupervisorName NVARCHAR(100), DirectReportID NUMERIC)
+	
+	IF ISNULL(@IncludeDirectReports, 0) = 0
+	BEGIN
+		INSERT INTO #SupervisorUsers(Account_ID, Supervisor_First_Name, Supervisor_Last_Name, [User_ID], User_First_Name, User_Last_Name, User_Username, AccountPermissions, isPermissionsOverride)
+		EXECUTE supervisorAccounts_getAccountUsersBySupervisorID @SupervisorID , @LCID, '%'
+	END
+	ELSE
+	BEGIN				
+		INSERT INTO #SupervisorUsers(Account_ID, Supervisor_First_Name, Supervisor_Last_Name, [User_ID], User_First_Name, User_Last_Name, User_Username, AccountPermissions, isPermissionsOverride, LevelNo, HasChildren, ParentUserID, UsernamePath, DirectReportID)
+		EXECUTE supervisorAccounts_getAccountUsersBySupervisorID @SupervisorID , @LCID, '%', @IncludeDirectReports												
+	END
+
+	-- populate ParentName in #SupervisorUsers table.
+	IF ISNULL(@IncludeDirectReports, 0) = 0
+	BEGIN
+		SELECT TOP 1 @SupervisorName = ISNULL((First_Name + ' ' + Last_Name), Username) FROM Users (NOLOCK) WHERE User_ID = @SupervisorID
+	END
+	ELSE
+	BEGIN
+		UPDATE SU SET
+			SupervisorName = ISNULL((U.First_Name + ' ' + U.Last_Name), U.Username)
+		FROM #SupervisorUsers SU
+			INNER JOIN Users U (NOLOCK) ON SU.ParentUserID = U.User_ID
+
+		UPDATE #SupervisorUsers SET 
+			SupervisorName = (SELECT TOP 1 ISNULL((First_Name + ' ' + Last_Name), Username) FROM Users (NOLOCK) WHERE User_ID = @SupervisorID)
+		WHERE SupervisorName IS NULL
+	END
+END
+
+IF @ItemType <> 'NA'
+BEGIN
+   INSERT INTO #Training([UserID], ItemType, ItemID, ItemName, ItemStatus, SkillScore, MinSkillScore, MaxSkillScore)
+   EXEC lc_sp_UserItemStatus_Read @ItemType, @ItemID, @LCID
+END 
+
+IF @Debug = 1 AND @Source = 'SupervisorUsers' 
+BEGIN
+	SELECT * FROM #SupervisorUsers
+END
+						
+SET @Sql ='SELECT U.User_ID, U.Username, U.First_Name, U.Last_Name, U.Street_1, U.Street_2, U.City, U.State_Province, U.Postal_Code, U.Country, U.Day_Phone, U.Eve_Phone, U.Pager, U.Interactive_Pager, U.Mobile_Phone, U.Fax, U.Email, U.Email2, U.SSN, U.Gender, U.Nickname, U.Spouse_Name, U.Company, U.Department, U.Job_Title, U.Manager_Name, U.Office, U.Profession, I.ImageURLPath, '''',  
+CASE L.Status WHEN 0 THEN ''Denied Access'' 
+              WHEN 1 THEN ''Pending Approval''
+			  WHEN 2 THEN ''Approved''
+			  WHEN 3 THEN ''Removed''
+			  WHEN 4 THEN ''Ad-hoc''
+END AS MemberStatus'
+
+IF @Source = 'SupervisorUsers' 
+BEGIN
+	SET @Sql = @Sql + ', SU.UsernamePath, SupervisorName, SU.DirectReportID '
+END
+ELSE
+BEGIN
+	SET @Sql = @Sql + ', '''' AS UsernamePath, ''' + ISNULL(@SupervisorName, '') + ''', 0 AS DirectReportID '
+END
+
+SET @Sql = @Sql + ',(SELECT COUNT(*) FROM dbo.LC_ItemNote n (NOLOCK) WHERE n.Item_ID = cast(U.User_ID as VARCHAR(36)) AND n.Type_ID = 3 AND n.StatusFlag = 1) AS UserNotesCount '
+
+IF @ItemType <> 'NA' 
+BEGIN
+	SET @Sql = @Sql + ', T.ItemType, T.ItemID, T.ItemName, T.ItemStatus, (CASE WHEN T.SkillScore = '''' THEN '''' ELSE T.SkillScore + ''|'' + T.MinSkillScore + ''|'' + T.MaxSkillScore END) '
+END
+ELSE
+BEGIN
+	SET @Sql = @Sql + ', '''' AS ItemType, '''' As ItemID, '''' As ItemName, '''' As ItemStatus, '''' As SkillScore '
+END
+
+SET @Sql = @Sql + ' 
+	FROM Users U (NOLOCK)' 
+IF @Source = 'SupervisorUsers' 
+	SET @Sql = @Sql + ' 
+		INNER JOIN #SupervisorUsers SU ON SU.User_ID = U.User_ID '
+IF @ItemType <> 'NA' 
+	SET @Sql = @Sql + ' 
+		INNER JOIN #Training T ON T.UserID = U.User_ID '      
+	SET @Sql = @Sql + ' 
+		INNER JOIN LC_Memberships L (NOLOCK) ON U.User_ID = L.Member_ID AND L.LC_ID = ' + CONVERT(VARCHAR(100), @LCID) + '
+		LEFT OUTER JOIN LC_Images I (NOLOCK) ON U.ImageID = I.ImageID		   
+				WHERE(  (''' + @UserStatus + ''' <> ''-1'' AND CONVERT(VARCHAR(36), L.Status) IN (SELECT Item FROM dbo.split(''' + @UserStatus + ''', '',''))  )
+				OR (''' + @UserStatus + ''' = ''-1'' AND EXISTS (SELECT 1 FROM UserAccessControl UAC (NOLOCK)
+											   WHERE UAC.UserAccountControlID IN (SELECT MAX(UAC1.UserAccountControlID) FROM UserAccessControl UAC1 (NOLOCK) WHERE UAC1.UserID = U.[User_ID] AND UAC1.LCID = L.LC_ID)
+											   AND UAC.AccessFlag = 0)))'
+IF ISNULL(@UserNameFirstLetter, '') <> ''	
+    SET @Sql = @Sql + ' AND U.Username like ''' + @UserNameFirstLetter + '%'' '					
+
+IF ISNULL(@FilterString, '') <> '' 	
+BEGIN	
+--	IF ((CHARINDEX('AND', LTRIM(@FilterString)) = 1) OR (CHARINDEX('OR', LTRIM(@FilterString)) = 1))  -- 13.6.2 - Vishal -  Added condition to handle extra 'AND', 'OR' coming because of ÔÇśItem statusÔÇÖ
+	IF CHARINDEX('AND', LTRIM(@FilterString)) = 1
+	BEGIN				
+		SET @Sql = @Sql + '(' + SUBSTRING(@FilterString, 4, LEN(@FilterString)) + ') '
+    END
+    ELSE IF CHARINDEX('OR', LTRIM(@FilterString)) = 1
+    BEGIN
+		SET @Sql = @Sql + '(' + SUBSTRING(@FilterString, 3, LEN(@FilterString)) + ') '
+	END
+    ELSE
+		SET @Sql = @Sql + ' AND (' +  @FilterString + ') '
+END		
+
+IF @GroupPathID <> ''
+BEGIN	
+	SET @SQL = @SQL + ' AND EXISTS (SELECT 1 FROM dbo.lc_fn_Group_GetMembers(''' + @GroupPathID + ''', 1, 1) G WHERE G.UserID > 0 AND L.Member_ID = G.UserID) '
+END
+
+IF @Debug = 1
+BEGIN
+	PRINT @Sql	
+END
+
+INSERT INTO #Users(User_ID, Username, First_Name, Last_Name, Street_1, Street_2, City, State_Province, Postal_Code, Country, Day_Phone, Eve_Phone, Pager, Interactive_Pager, Mobile_Phone, Fax,Email, Email2, SSN, Gender, Nickname, Spouse_Name, Company, Department, Job_Title, Manager_Name,Office,Profession, ImageURLPath, GroupNamePath, MemberStatus, UsernamePath, SupervisorName,DirectReportID, UserNotesCount, ItemType, ItemID, ItemName, ItemStatus, SkillScore)
+EXEC sp_executesql @Sql    			
+
+IF @Source = 'SupervisorUsers'
+BEGIN 	 	
+ DROP TABLE #SupervisorUsers		
+END
+
+			
+-- Select
+SET @Select = 'U.User_ID, U.Username, U.First_Name, U.Last_Name, U.Street_1, U.Street_2, U.City, U.State_Province, U.Postal_Code, U.Country, U.Day_Phone, U.Eve_Phone, U.Pager, U.Interactive_Pager, U.Mobile_Phone, U.Fax,U.Email, U.Email2, U.SSN, U.Gender, U.Nickname, U.Spouse_Name, U.Company, U.Department, U.Job_Title, U.Manager_Name,U.Office,U.Profession, U.ItemType, U.ItemName, U.ItemID, U.ItemStatus, U.SkillScore, U.ImageURLPath, U.GroupNamePath, U.MemberStatus, U.UsernamePath, U.SupervisorName, U.DirectReportID, U.UserNotesCount '
+SET @From = '#Users U ' 
+SET @Where = '1=1'
+SET @SortTable = '#Users'
+
+IF ISNULL(@SecondarySortField, '') = ''
+BEGIN	
+	INSERT INTO #Results
+	EXEC [lc_sp_LC_Paging] @ivKeyField = 'U.User_ID'
+	, @ivKeyTable		= @SortTable
+	, @ivSortField		= @PrimarySortField
+	, @ivSortTable		= @SortTable
+	, @ivExpression		= @PrimarySortOrderBy
+	, @iiPageNumber		= @PageNumber
+	, @iiPageSize		= @PageSize
+	, @ivSelect			= @Select
+	, @ivFrom			= @From
+	, @ivWhere			= @Where
+	, @ivWhere2			= @Where2
+	, @ibDebug 			= 0
+	, @ivKeyFieldDataType = 'numeric'
+	, @iiKeyFieldPrecision = 18
+	, @ivSortFieldDataType = 'nvarchar'
+	, @iiSortFieldPrecision = 100
+	, @iiSortFieldScale = 0	
+	, @ivSortingCulture = @SortingCultureCode
+END
+ELSE
+BEGIN
+	INSERT INTO #Results
+	EXEC [lc_sp_LC_PagingSort] @ivKeyField = 'U.User_ID'
+	, @ivKeyTable		= @SortTable
+	, @ivFirstSortField	= @PrimarySortField
+	, @ivFirstSortTable	= @SortTable
+	, @ivFirstExpression = @PrimarySortOrderBy		
+	, @ivSecondSortField = @SecondarySortField
+	, @ivSecondSortTable = @SortTable
+	, @ivSecondExpression = @SecondarySortOrderBy
+	, @iiPageNumber		= @PageNumber
+	, @iiPageSize		= @PageSize
+	, @ivSelect			= @Select
+	, @ivFrom			= @From
+	, @ivWhere			= @Where
+	, @ivWhere2			= @Where2
+	, @ibDebug 			= 0
+	, @ivKeyFieldDataType = 'numeric'
+	, @iiKeyFieldPrecision = 18
+	, @ivSort1FieldDataType = 'nvarchar'
+	, @iiSort1FieldPrecision = 100
+	, @iiSort1FieldScale = 0
+	, @ivSort2FieldDataType = 'nvarchar'
+	, @iiSort2FieldPrecision = 100
+	, @iiSort2FieldScale = 0
+	, @ivSortingCulture = @SortingCultureCode
+		
+END
+	
+-- Prepare selected field list
+SET @Fields = Replace(@Fields, '[User_ID]', 'U.[User_ID]')	
+SET @Fields = 'U.User_ID as ItemID,' + @Fields 
+IF PATINDEX('%Username%', @Fields) = 0 
+BEGIN
+  SET @Fields = @Fields + ', U.Username'
+END
+IF @IncludeDirectReports = 1
+BEGIN
+	SET @Fields = @Fields  + ', UsernamePath, DirectReportID, UserNotesCount'
+END
+
+IF @GroupPathID <> ''
+BEGIN
+	UPDATE #Results 
+		SET  GroupNamePath = dbo.lc_fn_GetGroupsForUserSearchResults(0, U.User_ID, '<br>', @GroupPathID)
+	FROM #Results U  	
+END
+
+-- Exec results 
+SET @Sql= 'SELECT ' +  @Fields  + ' FROM #Results U'
+
+IF @Debug = 1
+BEGIN
+	PRINT @Sql
+END
+
+EXEC sp_executesql @Sql
+
+-- Record count
+DECLARE @RecordCountSql NVARCHAR(4000)
+SET @RecordCountSql = 'SELECT COUNT(1) AS RecordCount FROM ' + @From + ' WHERE ' +  @Where 
+EXEC sp_executesql @RecordCountSql
+
+-- Skill Score Chart values
+IF @ItemType = 'JobProfile' AND EXISTS (SELECT 1 FROM LC_ModulePermission (NOLOCK) WHERE ModuleID = '387089F4-6082-4048-BA86-9E54F6D2DE94' AND PermissionID = '040304CE-4291-40B0-9E3A-6D435DDD90A8') AND @ShowDashboards = 'true'
+BEGIN
+	SELECT @ItemID AS JobProfileID, AVG(ISM.ItemScore )AS SkillScore, AVG(ISM.MinScore) AS MinSkillScore, AVG(ISM.MaxScore) AS MaxSkillScore
+	FROM #Users U	
+		LEFT OUTER JOIN UserItemScoreMap ISM (NOLOCK) ON ISM.ItemID = @ItemID AND ISM.ItemTypeID = 32 AND ISM.ItemScoreTypeID = 19 AND ISM.UserID = U.User_ID
+END
+ELSE IF @ItemType = 'NA' AND EXISTS (SELECT 1 FROM LC_ModulePermission (NOLOCK) WHERE ModuleID = '387089F4-6082-4048-BA86-9E54F6D2DE94' AND PermissionID = '040304CE-4291-40B0-9E3A-6D435DDD90A8') AND @ShowDashboards = 'true' 
+BEGIN
+	SELECT A.JobProfileID, A.SkillScore, A.MinSkillScore, A.MaxSkillScore
+	FROM (
+			SELECT @ItemID AS JobProfileID, AVG(ISNULL(ISM.ItemScore, 0))AS SkillScore, AVG(ISNULL(ISM.MinScore, 0)) AS MinSkillScore, AVG(ISNULL(ISM.MaxScore, 0)) AS MaxSkillScore
+			FROM #Users U
+				INNER JOIN SC_Users_JobProfile_Map UJPM (NOLOCK) ON UJPM.User_ID = U.User_ID AND UJPM.StatusFlag = 1
+				LEFT OUTER JOIN UserItemScoreMap ISM (NOLOCK) ON ISM.ItemID = CONVERT(VARCHAR(36), UJPM.JobProfileID) AND ISM.ItemTypeID = 32 AND ISM.ItemScoreTypeID = 19 AND ISM.UserID = U.User_ID
+		 ) AS A
+	WHERE A.MaxSkillScore > 0
+END
+ELSE
+BEGIN
+	-- Return empty resultset for skillscore
+	SELECT NULL AS JobProfileID, NULL AS SkillScore, NULL AS MinSkillScore, NULL AS MaxSkillScore
+	FROM #Users
+	WHERE 1 = 0
+END
+
+-- Job Profile Completion Chart values
+IF @ItemType = 'JobProfile' AND @ShowDashboards = 'true'
+BEGIN
+	-- completion count for selected item
+	INSERT INTO @Items(ItemID, StatusID, UserCount)
+	SELECT NULL, UJPM.StatusID, COUNT(*)
+	FROM #Users U 
+		INNER JOIN SC_Users_JobProfile_Map UJPM (NOLOCK) ON UJPM.User_ID = U.User_ID AND UJPM.JobProfileID = @ItemID AND UJPM.StatusFlag = 1
+	GROUP BY UJPM.StatusID	
+END
+ELSE IF @ItemType = 'NA' AND @ShowDashboards = 'true'
+BEGIN
+	-- completion count for all uses that are mapped to any job profile.
+	INSERT INTO @Items(ItemID, StatusID, UserCount)
+	SELECT NULL, UJPM.StatusID, COUNT(*)
+	FROM #Users U 
+		INNER JOIN SC_Users_JobProfile_Map UJPM (NOLOCK) ON UJPM.User_ID = U.User_ID AND UJPM.StatusFlag = 1
+	GROUP BY UJPM.StatusID
+END
+
+IF @ItemType IN ('NA', 'JobProfile') AND @ShowDashboards = 'true'
+BEGIN
+	-- Return the completion count
+	IF NOT EXISTS (SELECT * FROM @Items WHERE StatusID = 0)
+	BEGIN
+		INSERT INTO @Items(ItemID, StatusID, UserCount)
+		VALUES(NULL, 0, 0)
+	END
+	IF NOT EXISTS (SELECT * FROM @Items WHERE StatusID = 1)
+	BEGIN
+		INSERT INTO @Items(ItemID, StatusID, UserCount)
+		VALUES(NULL, 1, 0)
+	END
+
+	SELECT ItemID, StatusID, UserCount
+	FROM @Items
+END
+ELSE
+BEGIN	
+	-- Return empty resultset for job profile completion
+	SELECT NULL AS ItemID, NULL AS StatusID, NULL AS UserCount
+	FROM @Items
+END
+
+-- Goals Completion Chart values
+DELETE FROM @Items	
+IF @ItemType = 'Goal' AND @ShowDashboards = 'true'
+BEGIN
+	-- incomplet count for selected item
+	INSERT INTO @Items(ItemID, StatusID, UserCount)
+	SELECT @ItemID, 1, COUNT(*)
+	FROM #Users U (NOLOCK)
+		INNER JOIN PM_GoalAssignment GA (NOLOCK) ON GA.GoalID = @ItemID AND GA.ItemTypeID = 3 AND GA.ItemID = CONVERT(VARCHAR(30), U.User_ID) AND GA.StatusFlag = 1
+        INNER JOIN PM_GoalUserProgress GUP (NOLOCK) ON GUP.GoalAssignmentID = GA.GoalAssignmentID AND GUP.UserID = U.User_ID AND GUP.StatusFlag = 1
+
+	-- completed count for selected item
+	INSERT INTO @Items(ItemID, StatusID, UserCount)
+	SELECT @ItemID, 0, COUNT(*)
+	FROM #Users U 
+		INNER JOIN PM_GoalAssignment GA (NOLOCK) ON GA.GoalID = @ItemID AND GA.ItemTypeID = 3 AND GA.ItemID = CONVERT(VARCHAR(30), U.User_ID) AND GA.StatusFlag = 1
+		INNER JOIN PM_GoalUserProgressHistory GUPH (NOLOCK) ON GUPH.GoalAssignmentID = GA.GoalAssignmentID AND GUPH.UserID = U.User_ID AND GUPH.StatusFlag = 1 	
+END
+
+IF @ItemType IN ('Goal') AND @ShowDashboards = 'true'
+BEGIN
+	-- Return the completion count
+	IF NOT EXISTS (SELECT * FROM @Items WHERE StatusID = 0)
+	BEGIN
+		INSERT INTO @Items(ItemID, StatusID, UserCount)
+		VALUES(NULL, 0, 0)
+	END
+	IF NOT EXISTS (SELECT * FROM @Items WHERE StatusID = 1)
+	BEGIN
+		INSERT INTO @Items(ItemID, StatusID, UserCount)
+		VALUES(NULL, 1, 0)
+	END
+
+	SELECT ItemID, StatusID, UserCount
+	FROM @Items
+END
+ELSE
+BEGIN	
+	-- Return empty resultset for goals completion
+	SELECT NULL AS ItemID, NULL AS StatusID, NULL AS UserCount
+	FROM @Items
+END
+
+DROP TABLE #Filter
+DROP TABLE #Users
+DROP TABLE #Training
+DROP TABLE #Results
+ 
+IF @@ERROR <> 0
+BEGIN
+	-- Error
+	RAISERROR( '-101 :: [SQL ERROR]',16,1 )
+	RETURN -101
+END
+
+SET NOCOUNT OFF
+GO
+
+GRANT EXECUTE ON [dbo].[lc_sp_UserSearch_Read] TO [WebApp] AS [dbo]
+GO
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[InsertUserAssignmentInstanceFromGradebook]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[InsertUserAssignmentInstanceFromGradebook]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE PROCEDURE [dbo].[InsertUserAssignmentInstanceFromGradebook] 
+( @AssignmentID NUMERIC
+, @UserID NUMERIC
+, @LCID NUMERIC
+, @Status VARCHAR(15)
+, @Grade NUMERIC
+, @ReviewedBy NUMERIC
+, @Type NUMERIC
+, @TestID NUMERIC
+, @TestInstanceID NUMERIC
+, @PointValue NUMERIC = NULL
+) 
+AS
+/*********************************************************************************
+ SP Description: This SP inserts user's grade from gradebook
+ 		Parameters: 	@AssignmentID --> ID of the assignment
+				@UserID --> ID of the user
+				@LCID --> ID of LC.
+				@Status --> Status (gradedtest or viewdtest)
+				@Grade --> Grade
+				@ReviewedBy --> Reviewd By
+				@Type --> Type of User Assignment
+				@TestID --> ID of test
+				@TestInstanceID --> ID of test instance
+
+ Revision Hisotry
+ Revision	Date		Changed By - Change Description
+ 9.3.1		08/21/2006	KGC - Changed the code to check for Test_Instance_ID and User_ID combination 
+							  instead of Assignment_ID and User_ID combination.
+ 11.12.1	10/09/2008	JT	-  Completion Status Changes
+ 12.4.1		03/23/2009	KGC - Added code to NOT update the OriginalGrade once it is updated.
+							  This is done to keep the original grade in User_Assignments table.
+ 13.11.1	10/12/2010	KGC - Added a new parameter @PointValue	
+ 2013.22.0.1 06/25/2013 MB - Added update TrainingOffering_User_Map.
+ 2013.22.0.2	07/03/2013	ET - If a user is assigned to a TO assignment that has already completed the TO, the should get the Assignment completed.
+ 2014.22.1.0	08/21/2014	TY			- LEARN-10244 fix multiple duplicate submits in the user assignment table  
+**********************************************************************************/
+
+SET NOCOUNT ON
+
+DECLARE @isInsert TINYINT
+DECLARE @nUserAssignmentID NUMERIC
+--11.12.1
+DECLARE @StatusID INT
+SET @StatusID = CASE ISNULL(@status, '') 
+					 WHEN 'new' THEN 1 -- Incomplete
+					 WHEN 'approved' THEN 0 -- Completed
+					 WHEN 'viewedtest' THEN 1 -- Incomplete
+					 WHEN 'gradedtest' THEN 0 -- Completed
+					 WHEN 'submitted' THEN 9 -- Submitted
+					 WHEN 'removed' THEN 5 -- Not Attempted				
+				ELSE 1
+				END	
+
+-- Added the IF Condition by Kushal -- 11/30/2005
+-- If the assignment/user combination exists, we need to update it.
+-- 9.3.1
+--IF EXISTS (SELECT 1 FROM User_Assignments WHERE Assignment_ID = @assignmentid AND User_ID = @userid)
+IF EXISTS (SELECT 1 FROM User_Assignments WHERE Test_Instance_ID = @TestInstanceID AND User_ID = @UserID)
+-- End - 9.3.1
+BEGIN
+	-- Update
+	UPDATE User_Assignments SET
+		LC_ID = @LCID,
+		Status = @Status,
+		StatusID = @StatusID, -- 11.12.1
+		Date_Submitted = CURRENT_TIMESTAMP,
+		Date_Reviewed = CURRENT_TIMESTAMP,
+		Grade = @Grade,
+		Reviewed_By = @Reviewedby,
+		User_Assignment_Type = @Type,
+		Test_ID = @TestID,
+		OriginalGrade = ISNULL(OriginalGrade, Grade),	-- 9.3.1
+		FromGradeBook = 1,	-- 9.3.1
+		LastUpdate = GETDATE(),
+		LastUserID = @Reviewedby
+	WHERE Test_Instance_ID = @TestInstanceID 	-- 9.3.1
+		AND User_ID = @UserID
+END
+ELSE
+BEGIN
+	-- Insert	
+	IF NOT EXISTS(SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND [User_ID] = @userid
+			AND LC_ID = @LCID AND StatusID = @StatusID)
+	BEGIN
+		INSERT INTO User_Assignments (Assignment_ID, User_ID, LC_ID, Status, Date_Submitted, Date_Reviewed, Grade, Reviewed_By, User_Assignment_Type, Test_ID, Test_Instance_ID, FromGradeBook, StatusID, Point_Value, LastUpdate, LastUserID)	-- 9.3.1
+		SELECT @AssignmentID, @UserID, @lcid, @Status, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, @Grade, @ReviewedBy, @Type, @TestID, @TestInstanceID, 1, @StatusID, @PointValue, GETDATE(), @ReviewedBy					-- 9.3.1
+		  WHERE NOT EXISTS (SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @AssignmentID AND User_ID = @UserID
+			AND LC_ID = @LCID AND StatusID = @StatusID)
+
+		SET @nUserAssignmentID = SCOPE_IDENTITY()
+	  
+		SET @isInsert = 1
+	END
+END
+
+DECLARE @TrainingOfferingID INT
+SET @TrainingOfferingID = (SELECT A.ItemID FROM Assignments A WITH (NOLOCK) WHERE A.Assignment_ID = @AssignmentID AND A.ItemTypeID = 71)
+
+IF @TrainingOfferingID IS NOT NULL 
+	AND NOT EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 1)
+BEGIN
+      IF EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 0)
+      BEGIN
+            -- Reactivate
+            UPDATE TrainingOffering_User_Map SET
+                  StatusFlag = 1,
+                  AssignedDate = GETDATE(),
+                  --LastUserID = @inLastUserID,
+                  LastUpdate = GETDATE()
+            WHERE TrainingOfferingID = @TrainingOfferingID 
+                  AND UserID = @UserID
+      END
+      ELSE
+      BEGIN 
+            -- Insert         
+            INSERT INTO TrainingOffering_User_Map(TrainingOfferingID, UserID, StatusFlag, AssignedDate, CreateDate, CreateUserID)
+            VALUES(@TrainingOfferingID, @UserID, 1, GETDATE(), GETDATE(), @UserID)                      
+      END
+      
+      EXEC lc_sp_TrainingOffering_CompletionStatus_Upd @TrainingOfferingID, @UserID, 'TrainingOfferingUserAdded', NULL, NULL, NULL, 1, 0
+END 
+
+IF @TrainingOfferingID IS NOT NULL
+BEGIN
+	-- And, maybe the user already completed the Training Offering or some such business. If so, fire off some logic to Central which will trigger automation to handle this Assignment
+	-- and complete it if necessary.
+	IF EXISTS 
+	(
+		SELECT 1
+		FROM TrainingOffering_User_Map
+		WHERE UserID = @userid
+		AND TrainingOfferingID = @TrainingOfferingID
+		AND StatusFlag = 1
+		AND CompletionStatusID = 0 -- completed
+	)
+	BEGIN
+		DECLARE @UserList varchar(max)
+		SET @UserList = CONVERT(varchar, @userid)
+		EXEC lc_sp_TrainingOffering_Process_Automation_Request @iiTrainingOfferingID = @TrainingOfferingID, @ivUserIDs = @UserList, @inLCID = @lcid, @inLastUserID = @Reviewedby, @ivAction = 'TrainingOfferingCompletedUserAddedToAssignment'  
+	END
+END
+
+-- if this is an insert check if there are dups
+IF ISNULL(@isInsert, 0) = 1 
+BEGIN 
+	EXEC [lc_sp_User_AssignmentsDup_Del] @inUserAssignmentID=@nUserAssignmentID
+END
+
+SET NOCOUNT OFF
+
+GO
+
+GRANT EXECUTE ON [dbo].[InsertUserAssignmentInstanceFromGradebook] TO [WebApp] AS [dbo]
+GO
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[InsertUserAssignmentFromGradebook]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[InsertUserAssignmentFromGradebook]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER OFF
+GO
+
+CREATE PROCEDURE [dbo].[InsertUserAssignmentFromGradebook]
+( @assignmentid numeric
+, @userid numeric
+, @lcid numeric
+, @status varchar(15)
+, @grade numeric
+, @reviewedby numeric
+, @type numeric
+, @testid numeric
+) 
+AS
+/*****************************************************************************
+  SP Description:	
+
+	This procedure inserts and updates user assignments and is meant to be 
+	called from the gradebook page.  On updates, this proc only updates the
+	"date_submitted" column when the value is the default of 1/1/2007, 
+	otherwise, it leaves the existing value there.
+
+  Revision History:
+
+		Revision Date		Developer Name		Change Description
+		11/30/2005	Kushal Chokshi		Added the IF Condition
+		07/20/2007	Reuben Soto			Added revision history
+		07/20/2007	Reuben Soto			Added description block & comments
+		07/20/2007	Reuben Soto			Added nested IF to determine if date_submitted 
+										should be updated on update
+11.12.1	10/09/2008	JT				-  Completion Status Changes
+2013.22.0.1 06/25/2013 MB - Added update TrainingOffering_User_Map.
+2013.22.0.2	07/03/2013	ET - If a user is assigned to a TO assignment that has already completed the TO, the should get the Assignment completed.
+2014.22.1.0	08/21/2014	TY			- LEARN-10244 fix multiple duplicate submits in the user assignment table  
+******************************************************************************/
+DECLARE @isInsert TINYINT
+DECLARE @nUserAssignmentID NUMERIC
+--11.12.1
+DECLARE @StatusID INT
+SET @StatusID = CASE ISNULL(@status, '') 
+					 WHEN 'new' THEN 1 -- Incomplete
+					 WHEN 'approved' THEN 0 -- Completed
+					 WHEN 'viewedtest' THEN 1 -- Incomplete
+					 WHEN 'gradedtest' THEN 0 -- Completed
+					 WHEN 'submitted' THEN 9 -- Submitted
+					 WHEN 'removed' THEN 5 -- Not Attempted				
+				ELSE 1
+				END	
+
+-- Added the IF Condition by Kushal -- 11/30/2005
+-- If the assignment/user combination exists, we need to update it.
+IF EXISTS (SELECT 1 FROM User_Assignments WHERE Assignment_ID = @assignmentid AND User_ID = @userid)
+BEGIN
+	-- Update
+	UPDATE User_Assignments SET
+	LC_ID = @lcid,
+	Status = @status,
+	StatusID = @StatusID, --11.12.1
+	Date_Submitted = (CASE WHEN Date_Submitted = CONVERT(DATETIME, '1/1/2000') THEN CURRENT_TIMESTAMP ELSE Date_Submitted END),
+	Date_Reviewed = CURRENT_TIMESTAMP,
+	Grade = @grade,
+	Reviewed_By = @reviewedby,
+	User_Assignment_Type = @type,
+	Test_ID = @testid
+	WHERE Assignment_ID = @assignmentid 
+	AND User_ID = @userid
+END
+ELSE
+BEGIN
+	-- Insert
+	IF NOT EXISTS(SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND [User_ID] = @userid
+			AND LC_ID = @lcid AND StatusID = @StatusID)
+	BEGIN
+		INSERT INTO User_Assignments (Assignment_ID, User_ID, LC_ID, Status, Date_Submitted, Date_Reviewed, Grade, Reviewed_By, User_Assignment_Type, Test_ID, StatusID)
+		SELECT @assignmentid, @userid, @lcid, @status, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, @grade, @reviewedby, @type, @testid, @StatusID
+		  WHERE NOT EXISTS (SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND User_ID = @userid
+			AND LC_ID = @lcid AND StatusID = @StatusID)
+
+		SET @nUserAssignmentID = SCOPE_IDENTITY()
+	  
+		SET @isInsert = 1
+	END
+END
+
+DECLARE @TrainingOfferingID INT
+SET @TrainingOfferingID = (SELECT A.ItemID FROM Assignments A WITH (NOLOCK) WHERE A.Assignment_ID = @assignmentid AND A.ItemTypeID = 71)
+
+IF @TrainingOfferingID IS NOT NULL 
+	AND NOT EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 1)
+BEGIN
+      IF EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 0)
+      BEGIN
+            -- Reactivate
+            UPDATE TrainingOffering_User_Map SET
+                  StatusFlag = 1,
+                  AssignedDate = GETDATE(),
+                  --LastUserID = @inLastUserID,
+                  LastUpdate = GETDATE()
+            WHERE TrainingOfferingID = @TrainingOfferingID 
+                  AND UserID = @userid
+      END
+      ELSE
+      BEGIN 
+            -- Insert         
+            INSERT INTO TrainingOffering_User_Map(TrainingOfferingID, UserID, StatusFlag, AssignedDate, CreateDate, CreateUserID)
+            VALUES(@TrainingOfferingID, @userid, 1, GETDATE(), GETDATE(), @userid)                      
+      END
+      
+      EXEC lc_sp_TrainingOffering_CompletionStatus_Upd @TrainingOfferingID, @userid, 'TrainingOfferingUserAdded', NULL, NULL, NULL, 1, 0
+END 
+
+IF @TrainingOfferingID IS NOT NULL
+BEGIN
+	-- And, maybe the user already completed the Training Offering or some such business. If so, fire off some logic to Central which will trigger automation to handle this Assignment
+	-- and complete it if necessary.
+	IF EXISTS 
+	(
+		SELECT 1
+		FROM TrainingOffering_User_Map
+		WHERE UserID = @userid
+		AND TrainingOfferingID = @TrainingOfferingID
+		AND StatusFlag = 1
+		AND CompletionStatusID = 0 -- completed
+	)
+	BEGIN
+		DECLARE @UserList varchar(max)
+		SET @UserList = CONVERT(varchar, @userid)
+		EXEC lc_sp_TrainingOffering_Process_Automation_Request @iiTrainingOfferingID = @TrainingOfferingID, @ivUserIDs = @UserList, @inLCID = @lcid, @inLastUserID = 1000, @ivAction = 'TrainingOfferingCompletedUserAddedToAssignment'  
+	END
+END
+
+-- if this is an insert check if there are dups
+IF ISNULL(@isInsert, 0) = 1 
+BEGIN 
+	EXEC [lc_sp_User_AssignmentsDup_Del] @inUserAssignmentID=@nUserAssignmentID
+END
+
+
+GO
+GRANT EXECUTE ON [dbo].[InsertUserAssignmentFromGradebook] TO [WebApp]
+
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[InsertUserAssignmentWithStatus]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[InsertUserAssignmentWithStatus]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE PROCEDURE [dbo].[InsertUserAssignmentWithStatus]
+( @assignmentid NUMERIC
+, @userid NUMERIC
+, @datevisible DATETIME
+, @duedate DATETIME
+, @lcid NUMERIC
+, @status VARCHAR(15)
+, @assignmentType SMALLINT = 1
+, @inLastUserID NUMERIC = NULL
+) 
+AS
+/*****************************************************************************
+  SP Description: This SP inserts the course details into Courses table.
+
+  Revision History:
+  Revision	Date		Developer - Change Description
+  ???		???		    ??? - Initial creation.
+  11.10.1	08/20/2008	JT -  Changed to return userassignmentid
+  11.12.1	10/09/2008	JT -  Completion Status Changes
+  12.2.1    02/06/2009  JT - Add LastUserID, LastUpdate to insert/update
+  13.6.1	04/26/2010	KGC - Added return SELECT instead of just RETURN
+  14.7.1	08/06/2012	KGC - Replaced the INSERT statement to check for existing values while inserting (LEARN-4956)
+  2013.22.0.1 06/25/2013 MB - Added update TrainingOffering_User_Map.
+  2013.22.0.2 07/03/2013	ET - If a user is assigned to a TO assignment that has already completed the TO, the should get the Assignment completed.
+  2014.22.1.0 08/21/2014	TY - LEARN-10244 fix multiple duplicate submits in the user assignment table  
+******************************************************************************/
+SET NOCOUNT ON
+
+DECLARE @userassignmentid NUMERIC
+DECLARE @isInsert TINYINT
+
+--11.12.1
+DECLARE @StatusID INT
+SET @StatusID = CASE ISNULL(@status, '') 
+					 WHEN 'new' THEN 1 -- Incomplete
+					 WHEN 'approved' THEN 0 -- Completed
+					 WHEN 'viewedtest' THEN 1 -- Incomplete
+					 WHEN 'gradedtest' THEN 0 -- Completed
+					 WHEN 'submitted' THEN 9 -- Submitted
+					 WHEN 'removed' THEN 5 -- Not Attempted				
+				ELSE 1
+				END	
+
+-- Added the IF Condition by Kushal -- 11/30/2005
+-- If the assignment/user combination exists, we need to update it.
+IF EXISTS (SELECT 1 FROM User_Assignments WHERE Assignment_ID = @assignmentid AND User_ID = @userid)
+BEGIN
+	-- Update
+	UPDATE User_Assignments SET
+		Date_Assigned = CURRENT_TIMESTAMP,
+		Date_Visible = @datevisible,
+		Due_Date = @duedate,
+		Date_Submitted = CURRENT_TIMESTAMP,
+		LC_ID = @lcid,
+		Status = @status,
+		StatusID = @StatusID, -- 11.12.1
+		Assignment_Type = @assignmentType,
+		LastUserID = ISNULL(@inLastUserID, LastUserID),
+		LastUpdate = GetDate()  
+	WHERE Assignment_ID = @assignmentid 
+		AND User_ID = @userid
+
+	SET @userassignmentid = (SELECT User_Assignment_ID FROM User_Assignments WHERE Assignment_ID = @assignmentid AND User_ID = @userid)
+END
+ELSE
+BEGIN
+	IF NOT EXISTS(SELECT 1 FROM User_Assignments(NOLOCK) WHERE Assignment_ID = @assignmentid AND [User_ID] = @userid
+			AND LC_ID = @lcid AND StatusID = @StatusID)
+	BEGIN
+		INSERT INTO User_Assignments(Assignment_ID, User_ID, Date_Assigned, Date_Visible, Due_Date, Date_Submitted, LC_ID,Status, Assignment_Type, StatusID, LastUserID)
+		SELECT @assignmentid, @userid, CURRENT_TIMESTAMP, @datevisible, @duedate, CURRENT_TIMESTAMP, @lcid,@status, @assignmentType, @StatusID, @inLastUserID
+		WHERE NOT EXISTS (SELECT 1 FROM User_Assignments WHERE Assignment_ID = @assignmentid AND User_ID = @userid
+			AND LC_ID = @lcid AND StatusID = @StatusID)
+			
+		SET @userassignmentid = SCOPE_IDENTITY()
+		
+		SET @isInsert = 1
+	  END
+END
+
+DECLARE @TrainingOfferingID INT
+SET @TrainingOfferingID = (SELECT A.ItemID FROM Assignments A WITH (NOLOCK) WHERE A.Assignment_ID = @assignmentid AND A.ItemTypeID = 71)
+
+IF @TrainingOfferingID IS NOT NULL 
+	AND NOT EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 1)
+BEGIN
+      IF EXISTS (SELECT 1 FROM TrainingOffering_User_Map TOUM WITH (NOLOCK) WHERE TOUM.TrainingOfferingID = @TrainingOfferingID AND TOUM.UserID = @userid AND TOUM.StatusFlag = 0)
+      BEGIN
+            -- Reactivate
+            UPDATE TrainingOffering_User_Map SET
+                  StatusFlag = 1,
+                  AssignedDate = GETDATE(),
+                  LastUserID = @inLastUserID,
+                  LastUpdate = GETDATE()
+            WHERE TrainingOfferingID = @TrainingOfferingID 
+                  AND UserID = @userid
+      END
+      ELSE
+      BEGIN 
+            -- Insert         
+            INSERT INTO TrainingOffering_User_Map(TrainingOfferingID, UserID, StatusFlag, AssignedDate, CreateDate, CreateUserID)
+            VALUES(@TrainingOfferingID, @userid, 1, GETDATE(), GETDATE(), COALESCE(@inLastUserID,@userid))                      
+      END
+      
+      EXEC lc_sp_TrainingOffering_CompletionStatus_Upd @TrainingOfferingID, @userid, 'TrainingOfferingUserAdded', NULL, NULL, @inLastUserID, 1, 0
+END 
+
+IF @TrainingOfferingID IS NOT NULL
+BEGIN
+	-- And, maybe the user already completed the Training Offering or some such business. If so, fire off some logic to Central which will trigger automation to handle this Assignment
+	-- and complete it if necessary.
+	IF EXISTS 
+	(
+		SELECT 1
+		FROM TrainingOffering_User_Map
+		WHERE UserID = @userid
+		AND TrainingOfferingID = @TrainingOfferingID
+		AND StatusFlag = 1
+		AND CompletionStatusID = 0 -- completed
+	)
+	BEGIN
+		DECLARE @UserList varchar(max)
+		SET @UserList = CONVERT(varchar, @userid)
+		EXEC lc_sp_TrainingOffering_Process_Automation_Request @iiTrainingOfferingID = @TrainingOfferingID, @ivUserIDs = @UserList, @inLCID = @lcid, @inLastUserID = @inLastUserID, @ivAction = 'TrainingOfferingCompletedUserAddedToAssignment'  
+	END
+END
+
+-- if this is an insert check if there are dups
+IF ISNULL(@isInsert, 0) = 1 
+BEGIN 
+	EXEC [lc_sp_User_AssignmentsDup_Del] @inUserAssignmentID=@userassignmentid
+END
+
+SELECT @userassignmentid
+
+RETURN @userassignmentid
+
+SET NOCOUNT OFF
+
+
+GO
+
+GRANT EXECUTE ON [dbo].[InsertUserAssignmentWithStatus] TO [WebApp] AS [dbo]
+GO
+
+

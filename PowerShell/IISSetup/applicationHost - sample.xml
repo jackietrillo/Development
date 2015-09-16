@@ -1,0 +1,208 @@
+     <sites>
+            <site name="Default Web Site" id="1" serverAutoStart="true">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\codemaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Regression" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Regression\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Regression\lc" />
+                </application>
+                <application path="/crystalreportviewers115/JavaPlugin/Win32" applicationPool="DefaultAppPool">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster\crystalreportviewers115\JavaPlugin\Win32" />
+                </application>
+                <bindings>
+                    <binding protocol="http" bindingInformation="*:80:" />
+                    <binding protocol="net.tcp" bindingInformation="808:*" />
+                    <binding protocol="net.pipe" bindingInformation="*" />
+                    <binding protocol="net.msmq" bindingInformation="localhost" />
+                    <binding protocol="msmq.formatname" bindingInformation="localhost" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+ 	    <site name="Qa1" id="2" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Regression\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Regression\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1.oracle.com" />                    
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+ 	    <site name="Qa1 New Customer" id="3" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Regression" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Regression\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Regression\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1newcustomer.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+    	    <site name="Qa1 Regression" id="4" serverAutoStart="true">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="C:\files\Qa1Regression" userName="webster_qa" password="[enc:AesProvider:WXYO1CrLuBpOHxp/CAxUCTSkhzytHxPy4b6O13M+LA4=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Regression\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Regression\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1regression.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+             </site>
+	     <site name="Qa1 Projects" id="5" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - QA Projects" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - QA Projects\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - QA Projects\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1qaprojects.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Customer Data" id="6" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - CustomerData" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - CustomerData\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 -CustomerData\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1customerdata.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Integration 1" id="7" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Integration 1" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Integration 1\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Integration 1\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1Integration1.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+    	    <site name="Qa1 Integration 2" id="8" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Integration 2" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Integration 2\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Integration 2\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1Integration2.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+            <site name="Qa1 Localization 1" id="9" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - localization 1" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Localization 1\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Localization 1\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1localizationproject1.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	     <site name="Qa1 Localization 2" id="10" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - localization 2" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Localization 2\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Localization 2\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1localizationproject2.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Localization 3" id="11" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - localization 3" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Localization 3\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Localization 3\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1localizationproject3.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Localization 4" id="12" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - localization 4" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Localization 4\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Localization 4\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1localizationproject4.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Localization 5" id="13" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - localization 5" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Localization 5\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Localization 5\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1localizationproject5.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Automation" id="14" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Automation" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Automation\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Automation\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1automation.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Enterprise" id="15" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - Enterprise" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - Enterprise\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 Enterprise\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1enterprise.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+	    <site name="Qa1 Tee Integration" id="16" serverAutoStart="false">
+                <application path="/">
+                    <virtualDirectory path="/" physicalPath="C:\CodeMaster" />
+                    <virtualDirectory path="/files" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 - TEE Integration" userName="webster_qa" password="[enc:AesProvider:qDBB/JTTQvl6iyycryAUxeYhNjhyW9YFNX8P2G65VIM=:enc]" />
+                    <virtualDirectory path="/custom" physicalPath="C:\sites\QA1 - TEE Integration\custom" />
+                    <virtualDirectory path="/images/skins/lc" physicalPath="\\slc07gcj.us.oracle.com\files\QA1\QA1 TEE Integration\lc" />
+                </application>             
+                <bindings>
+                    <binding protocol="http" bindingInformation="156.151.39.35:80:learn-qa1teeintegration.oracle.com" />
+                </bindings>
+                <logFile period="MaxSize" truncateSize="2000000" />
+            </site>
+
+            <siteDefaults>
+                <logFile logFormat="W3C" directory="%SystemDrive%\inetpub\logs\LogFiles" />
+                <traceFailedRequestsLogging directory="%SystemDrive%\inetpub\logs\FailedReqLogFiles" />
+            </siteDefaults>
+            <applicationDefaults applicationPool="DefaultAppPool" />
+            <virtualDirectoryDefaults allowSubDirConfig="true" />
+        </sites>

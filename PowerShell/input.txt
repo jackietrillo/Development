@@ -1,0 +1,10 @@
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\lc_sp_User_AssignmentsDup_Del.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\lc_sp_User_Assignments_InsUpd.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\lc_sp_TrainingOffering_CompletionStatus_Upd.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\InsertUserAssignment.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\InsertUpdateLCMemberData.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\lc_sp_TrainingOffering_Items.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\lc_sp_UserSearch_Read.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\InsertUserAssignmentInstanceFromGradebook.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\InsertUserAssignmentFromGradebook.sql
+D:\Taleo\trunk\Database\LDCDev\StoredProcedures\InsertUserAssignmentWithStatus.sql

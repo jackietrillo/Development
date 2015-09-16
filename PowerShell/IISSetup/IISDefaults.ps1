@@ -1,0 +1,16 @@
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd set apppool /apppool.name:DefaultAppPool /managedRuntimeVersion:v4.0"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd set apppool /apppool.name:DefaultAppPool /managedPipelineMode:Integrated"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:asp /codePage:65001"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set apppool /apppool.name:DefaultAppPool /enable32BitAppOnWin64:true"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:defaultDocument /+files.[value='gateway.asp']" 
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:anonymousAuthentication /enabled:true" 
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:windowsAuthentication /enabled:true" 
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /errorMode:Custom"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /[statusCode='404'].responseMode:ExecuteURL"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /[statusCode='404'].prefixLanguageFilePath:"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /[statusCode='404'].path:/gateway.asp"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /[statusCode='403.14'].responseMode:ExecuteURL"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /[statusCode='403.14'].prefixLanguageFilePath:"
+CMD /C "%systemroot%\syswow64\inetsrv\appcmd.exe set config /section:httpErrors /[statusCode='403.14'].path:/gateway.asp"
+
+<# TODO: Set app pool identity to .\webster_qa #>
