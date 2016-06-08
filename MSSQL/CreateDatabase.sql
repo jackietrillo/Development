@@ -1,8 +1,8 @@
-IF NOT EXISTS(SELECT name FROM master.dbo.sysdatabases WHERE ('[' + name + ']' = 'Test'))
+IF NOT EXISTS(SELECT name FROM master.dbo.sysdatabases WHERE name = 'App')
 BEGIN
-	CREATE DATABASE Test ON  PRIMARY 
-	( NAME = N'Test', FILENAME = N'D:\data\test.mdf' , SIZE = 12544KB , MAXSIZE = UNLIMITED, FILEGROWTH = 1024KB )
+	CREATE DATABASE App ON  PRIMARY 
+	( NAME = N'App_data', FILENAME = N'D:\Data\App_data.mdf', SIZE = 12544KB , MAXSIZE = UNLIMITED, FILEGROWTH = 1024KB )
 	 LOG ON 
-	( NAME = N'Test_Log', FILENAME = N'D:\data\data_Log.ldf' , SIZE = 8512KB , MAXSIZE = 2048GB , FILEGROWTH = 10%)
-END
+	( NAME = N'App_log', FILENAME = N'D:\Data\App_log.ldf', SIZE = 8512KB , MAXSIZE = 2048GB , FILEGROWTH = 10%)	
+END;
 GO

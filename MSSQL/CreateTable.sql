@@ -5,31 +5,30 @@ GO
 SET QUOTED_IDENTIFIER ON
 GO
 
-IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[LearningPlanRecurrenceJobProfileCompletion]') AND type in (N'U'))
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Employee]') AND type in (N'U'))
 BEGIN
-    CREATE TABLE [dbo].[LearningPlanRecurrenceJobProfileCompletion](
-        [LearningPlanRecurrenceJobProfileCompletionId]  INT IDENTITY(1, 1) NOT NULL,
-        [LearningPlanRecurrenceUserCompletionId]        INT NOT NULL CONSTRAINT [FK_LearningPlanRecurrenceJobProfileCompletion_LearningPlanRecurrenceUserCompletion] REFERENCES [dbo].[LearningPlanRecurrenceUserCompletion]([LearningPlanRecurrenceUserCompletionId]),
-        [JobProfileId]                                  UNIQUEIDENTIFIER NOT NULL CONSTRAINT [FK_LearningPlanRecurrenceJobProfileCompletion_JobProfile] REFERENCES [dbo].[SC_JobProfile]([JobProfileID]),
-        [CreateUserId]                                  NUMERIC(18, 0) NOT NULL CONSTRAINT [FK_LearningPlanRecurrenceJobProfileCompletion_Users] REFERENCES [dbo].[Users]([User_ID]),
-        [CreateDateUtc]                                 DATETIME NOT NULL CONSTRAINT [DF_LearningPlanRecurrenceJobProfileCompletion_CreateDateUtc] DEFAULT GETUTCDATE(),
-        CONSTRAINT [PK_LearningPlanRecurrenceJobProfileCompletion] PRIMARY KEY ([LearningPlanRecurrenceJobProfileCompletionId])
-    )
-
-    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The unique identifier of recurring Learning Plan Job Profile completion.', @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'LearningPlanRecurrenceJobProfileCompletion', @level2type=N'COLUMN',@level2name=N'LearningPlanRecurrenceJobProfileCompletionId'
-    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The unique identifier of recurring Learning Plan user completion.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'LearningPlanRecurrenceJobProfileCompletion', @level2type=N'COLUMN',@level2name=N'LearningPlanRecurrenceUserCompletionId'
-    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The unique identifier of Job Profile.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'LearningPlanRecurrenceJobProfileCompletion', @level2type=N'COLUMN',@level2name=N'JobProfileId'
-    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The unique identifier of user who has created this completion record.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'LearningPlanRecurrenceJobProfileCompletion', @level2type=N'COLUMN',@level2name=N'CreateUserId'
-    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The date of creation of this completion record.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'LearningPlanRecurrenceJobProfileCompletion', @level2type=N'COLUMN',@level2name=N'CreateDateUtc'
+    
+	CREATE TABLE dbo.Employee (
+		EmployeeId		INT	IDENTITY (1, 1) NOT NULL, 	
+		EmployeeNumber  NVARCHAR(15) NOT NULL,
+		FirstName		NVARCHAR(100) NOT NULL,	
+		LastName		NVARCHAR(100) NOT NULL,	  
+		Salary			DECIMAL(8,2) NOT NULL CONSTRAINT DF_Employee_Salary DEFAULT 52000,
+		[CreateUserId] INT NOT NULL CONSTRAINT [FK_Emplpoyee_User] REFERENCES [dbo].[User([UserId]),
+		[CreateDateUtc] DATETIME NOT NULL CONSTRAINT [DF_Employee_CreateDateUtc] DEFAULT GETUTCDATE(),
+		CONSTRAINT PK_Employee PRIMARY KEY CLUSTERED(EmployeeId ASC)
+	);
+	
+    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The unique identifier of user who has created this completion record.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'Employee', @level2type=N'COLUMN',@level2name=N'CreateUserId'
+    EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The date of creation of this employee record.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'Employee', @level2type=N'COLUMN',@level2name=N'CreateDateUtc'
 END
 GO
 
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE object_id = OBJECT_ID(N'[dbo].[LearningPlanRecurrenceJobProfileCompletion]') AND name = N'IX_LearningPlanRecurrenceJobProfileCompletion_LearningPlanRecurrenceUserCompletionId')
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE object_id = OBJECT_ID(N'[dbo].[Employee]') AND name = N'IX_Employee_EmployeeNumber')
 BEGIN
-    CREATE NONCLUSTERED INDEX [IX_LearningPlanRecurrenceJobProfileCompletion_LearningPlanRecurrenceUserCompletionId] ON [dbo].[LearningPlanRecurrenceJobProfileCompletion] ([LearningPlanRecurrenceUserCompletionId])
-END
-GO
+	CREATE UNIQUE NONCLUSTERED INDEX IX_Employee_EmployeeNumber ON dbo.Employee(EmployeeNumber ASC);
+END;
 
-GRANT SELECT ON [dbo].[LearningPlanRecurrenceJobProfileCompletion] TO WebApp
-GRANT INSERT ON [dbo].[LearningPlanRecurrenceJobProfileCompletion] TO WebApp
+GRANT SELECT ON [dbo].[Employee] TO AppRole
+GRANT INSERT ON [dbo].[Employee] TO AppApp
 GO
