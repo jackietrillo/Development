@@ -3,17 +3,17 @@
   "commands": 
 	[ 
 		{ "command": "dir", "description": "Lists the folder and files in a directory." },
-		{ "command": "type": "description": "Displays the file contents." },
-		{ "command": "del": "description": "Deletes the file." },
-		{ "command": "mkdir": "description": "Creates a new directory." },
-		{ "command": "rmdir": "description": "Removes a directory." },
-		{ "command": "pwd": "description": "Print working directory." },
-		{ "command": "cacls": "description": "Changes file permissions." },
-		{ "command": "echo": "description": "Prints text to the standard output stream." },
-		{ "command": ">": "description": "Pipes output to a file." },
-		{ "command": "cls": "description": "Clears the command window." },
-		{ "command": "netstat": "description": "Displays all the active TCP connections." },
-		{ "command": "ipconfig": "description": "Displays the computer's network configuration." },
+		{ "command": "type", "description": "Displays the file contents." },
+		{ "command": "del", "description": "Deletes the file." },
+		{ "command": "mkdir", "description": "Creates a new directory." },
+		{ "command": "rmdir", "description": "Removes a directory." },
+		{ "command": "pwd", "description": "Print working directory." },
+		{ "command": "cacls", "description": "Changes file permissions." },
+		{ "command": "echo", "description": "Prints text to the standard output stream." },
+		{ "command": ">", "description": "Pipes output to a file." },
+		{ "command": "cls", "description": "Clears the command window." },
+		{ "command": "netstat", "description": "Displays all the active TCP connections." },
+		{ "command": "ipconfig", "description": "Displays the computer's network configuration." },
    ]
 }
 
