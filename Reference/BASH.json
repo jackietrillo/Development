@@ -1,0 +1,8 @@
+{
+  "name": "bash",
+  "commands": 
+  [
+	{ "command": "ls", "description": "lists the folder contents" },
+	{ "command": "cat",  "description": "concatenates a file" }    
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name":  "GIT",
+  "commands": 
+  [
+    {
+      "command": "git status",
+      "description": "Displays the directory git status."
+    },
+    {
+      "command": "git clone theurl",
+      "description": "Clones a github repository."
+    },
+    {
+      "command": "git remote -v",
+      "description": "Displays the path to the remote origin."
+    },
+    {
+      "command": "git reset HEAD myFile.txt",
+      "description": "Unstages the file."
+    },
+    {
+      "command": "git checkout HEAD myFile.txt",
+      "description": "Gets the latest committed version of the file."
+    },
+    {
+      "command": "git add .",
+      "description": "Stages all modified files in the current directory."
+    },
+    {
+      "command": "git push origin master",
+      "description": "Commits modified files, stages added and removed files."
+    },
+  ]
+}
