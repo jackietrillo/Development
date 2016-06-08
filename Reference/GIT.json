@@ -24,11 +24,19 @@
     },
     {
       "command": "git add .",
-      "description": "Stages all modified files in the current directory."
+      "description": "Stages all added files in the current directory."
+    },
+	{
+      "command": "git rm .",
+      "description": "Stages all removed files in the current directory."
+    },
+	{
+      "command": "git commit .",
+      "description": "Commits all changes to the local git repository."
     },
     {
       "command": "git push origin master",
-      "description": "Commits modified files, stages added and removed files."
+      "description": "Pushes all committed changes to the remote branch."
     },
   ]
 }
